@@ -7,7 +7,7 @@
 1. 将 `dist/AnyToFire.dll` 与 `dist/AnyToFire.exe` 复制到 IIDX 根目录（与 `bm2dx.dll` 同目录）。
 2. 在 Spice2x 的 DLL 注入列表中加入 `AnyToFire.dll`。若同时使用 `IIDXScore.dll`，请将 AnyToFire 排在 IIDXScore 后面。该链式模式导出的成绩也包含 IIDXScore 对个人成绩缓存的本地覆盖。
 3. 启动游戏并登录玩家，等待游戏进入曲选。DLL 会在 `AnyToFire_exports/<时间-进程号>/` 写入 `manifest.json`、`fervidex.json`、`konami_sp.csv`、`konami_dp.csv`、`asphyxia.db`。每次读到 SP/DP 成绩会更新同一份导出。
-4. 退出游戏后运行 `AnyToFire.exe`。可通过“导入成绩”选择 Fervidex JSON、KONAMI SP/DP CSV 或 Asphyxia CORE `savedata.db`；导入只写入本工具的 `AnyToFire_exports`，不修改来源文件或 Asphyxia 服务端数据库。列表支持多选合并、重命名，以及分别另存三种格式。合并保留所有子成绩，并新增一份合并成绩。
+4. 退出游戏后运行 `AnyToFire.exe`。可通过“导入成绩”选择 Fervidex JSON、KONAMI SP/DP CSV 或 Asphyxia CORE `savedata.db`；导入只写入本工具的 `AnyToFire_exports`，不修改来源文件或 Asphyxia 服务端数据库。列表支持多选合并、重命名，以及分别另存三种格式。Fervidex JSON / KONAMI CSV 不含可靠的 IIDX ID，导入后请选中成绩，在下方填写该玩家的 ID 并点击“设置 IIDX ID”；合并要求所有来源的 ID 相同。合并保留所有子成绩，并新增一份合并成绩。
 
 DLL 日志在游戏根目录的 `AnyToFire.log`。EXE 默认读取同目录的 `AnyToFire_exports`，也可用 `AnyToFire.exe --data <导出目录>` 指定位置。项目使用 Rust；在本机运行 `build.ps1` 会重新编译并复制 DLL/EXE 到 `dist`。
 

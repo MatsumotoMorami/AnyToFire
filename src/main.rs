@@ -50,13 +50,17 @@ extern "system" {
 #[link(name="comdlg32")] extern "system" { fn GetSaveFileNameW(ofn: *mut OpenFileName) -> i32; fn GetOpenFileNameW(ofn: *mut OpenFileName) -> i32; }
 #[link(name="gdi32")] extern "system" { fn GetStockObject(index: i32) -> Hwnd; }
 
-struct App { root: PathBuf, items: Vec<Collection>, list: Hwnd, edit: Hwnd, status: Hwnd }
+struct App { root: PathBuf, items: Vec<Collection>, list: Hwnd, edit: Hwnd, id_edit: Hwnd, status: Hwnd }
 unsafe impl Send for App {}
 static APP: Mutex<Option<App>> = Mutex::new(None);
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
 fn popup(hwnd: Hwnd, message: &str, error: bool) { unsafe { MessageBoxW(hwnd, wide(message).as_ptr(), wide("AnyToFire").as_ptr(), if error { MB_ICONERROR } else { MB_ICONINFORMATION }); } }
 fn set_text(hwnd: Hwnd, value: &str) { unsafe { SetWindowTextW(hwnd, wide(value).as_ptr()); } }
 fn text_of(hwnd: Hwnd) -> String { let mut buf = vec![0u16; 1024]; let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) }; String::from_utf16_lossy(&buf[..n.max(0) as usize]) }
+fn normalized_iidx_id(value: &str) -> Option<String> {
+    let digits = value.trim().replace('-', "");
+    (digits.len() == 8 && digits.bytes().all(|b| b.is_ascii_digit())).then(|| format!("{}-{}", &digits[..4], &digits[4..]))
+}
 fn refresh(app: &mut App) {
     match core::load_collections(&app.root) {
         Ok(items) => app.items = items,
@@ -148,11 +152,18 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> 
             let indices = selected(app);
             let result = match id {
                 101 => { refresh(app); Ok(()) }
+                201 => { if indices.len() == 1 { set_text(app.id_edit, app.items[indices[0]].iidx_id.as_deref().unwrap_or("")); } Ok(()) }
                 102 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else { export_json(hwnd, &app.items[indices[0]]) } }
                 103 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else { export_csv(hwnd, &app.items[indices[0]]) } }
                 104 => merge_selected(hwnd, app, &indices),
                 106 => import_scores(hwnd, app),
                 107 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else { export_asphyxia(hwnd, &app.items[indices[0]]) } }
+                108 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else {
+                    match normalized_iidx_id(&text_of(app.id_edit)) {
+                        None => Err("IIDX ID 必须是 xxxx-xxxx".into()),
+                        Some(id) => { let mut item = app.items[indices[0]].clone(); item.iidx_id = Some(id); core::write_collection(&app.root, &item).map_err(|e| e.to_string()).map(|_| { refresh(app); }) }
+                    }
+                } }
                 105 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else {
                     let name = text_of(app.edit).trim().to_string();
                     if name.is_empty() { Err("请输入新名称".into()) } else {
@@ -179,7 +190,7 @@ fn main() {
     let class = wide("AnyToFireWindow");
     let wc = WndClass { style: 0, wnd_proc: Some(wnd_proc), cls_extra: 0, wnd_extra: 0, instance, icon: std::ptr::null_mut(), cursor: std::ptr::null_mut(), background: (6usize) as Hwnd, menu_name: std::ptr::null(), class_name: class.as_ptr() };
     if unsafe { RegisterClassW(&wc) } == 0 { return; }
-    let hwnd = unsafe { CreateWindowExW(0, class.as_ptr(), wide("AnyToFire · 成绩管理").as_ptr(), WS_OVERLAPPEDWINDOW, 100,100,940,560,std::ptr::null_mut(),std::ptr::null_mut(),instance,std::ptr::null_mut()) };
+    let hwnd = unsafe { CreateWindowExW(0, class.as_ptr(), wide("AnyToFire · 成绩管理").as_ptr(), WS_OVERLAPPEDWINDOW, 100,100,940,610,std::ptr::null_mut(),std::ptr::null_mut(),instance,std::ptr::null_mut()) };
     if hwnd.is_null() { return; }
     control(hwnd,"BUTTON","刷新",101,20,18,68,34,0,instance);
     control(hwnd,"BUTTON","导入成绩",106,98,18,92,34,0,instance);
@@ -190,7 +201,10 @@ fn main() {
     let list = control(hwnd,"LISTBOX","",201,20,64,882,365,WS_BORDER | WS_VSCROLL | LBS_EXTENDEDSEL,instance);
     let edit = control(hwnd,"EDIT","",202,20,445,350,30,WS_BORDER | ES_AUTOHSCROLL,instance);
     control(hwnd,"BUTTON","重命名选中成绩",105,380,443,160,34,0,instance);
-    let status = control(hwnd,"STATIC","",203,20,489,882,26,0,instance);
-    let mut app = App { root, items: vec![], list, edit, status }; refresh(&mut app); *APP.lock().unwrap() = Some(app);
+    control(hwnd,"STATIC","IIDX ID",204,20,492,55,26,0,instance);
+    let id_edit = control(hwnd,"EDIT","",205,80,482,135,30,WS_BORDER | ES_AUTOHSCROLL,instance);
+    control(hwnd,"BUTTON","设置 IIDX ID",108,225,481,130,34,0,instance);
+    let status = control(hwnd,"STATIC","",203,20,528,882,26,0,instance);
+    let mut app = App { root, items: vec![], list, edit, id_edit, status }; refresh(&mut app); *APP.lock().unwrap() = Some(app);
     unsafe { ShowWindow(hwnd, 1); UpdateWindow(hwnd); let mut msg = std::mem::zeroed::<Msg>(); while GetMessageW(&mut msg, std::ptr::null_mut(),0,0) > 0 { TranslateMessage(&msg); DispatchMessageW(&msg); } }
 }

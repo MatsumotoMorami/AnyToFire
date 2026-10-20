@@ -111,6 +111,7 @@ pub fn merge(items: &[Collection], name: String) -> Result<Collection, String> {
     if items.len() < 2 { return Err("至少选择两份成绩".into()); }
     let hash = &items[0].catalog_sha256;
     if items.iter().any(|x| x.catalog_sha256 != *hash) { return Err("曲库索引不同，不能按曲目 ID 安全合并".into()); }
+    if items.iter().any(|x| x.iidx_id.is_none()) { return Err("请先为所有待合并成绩设置 IIDX ID".into()); }
     let known_ids: std::collections::HashSet<&str> = items.iter().filter_map(|x| x.iidx_id.as_deref()).collect();
     if known_ids.len() > 1 { return Err("所选成绩的 IIDX ID 不同".into()); }
     let mut scores: BTreeMap<(u32, u8), Score> = BTreeMap::new();
@@ -199,6 +200,11 @@ pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
     #[test] fn merge_independent_bests() {
         let a = collection("a", 1500, Some(30), 5); let b = collection("b", 1400, Some(20), 6);
         let m = merge(&[a,b], "合并".into()).unwrap(); assert_eq!(m.scores[0].ex,1500); assert_eq!(m.scores[0].bp,Some(20)); assert_eq!(m.scores[0].lamp,6); assert_eq!(m.parents.len(),2);
+    }
+    #[test] fn merge_rejects_unknown_identity() {
+        let a = collection("a", 1500, Some(30), 5);
+        let mut b = collection("b", 1400, Some(20), 6); b.iidx_id = None;
+        assert!(merge(&[a,b], "合并".into()).is_err());
     }
     #[test] fn static_json_schema() {
         let value: serde_json::Value = serde_json::from_slice(&fervidex_json(&collection("a",1500,None,5)).unwrap()).unwrap();
