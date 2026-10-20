@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>AnyToFire · 成绩库界面演示</title>
+  <style>
+    :root {
+      font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", sans-serif;
+      color: #172222;
+      background: #edf0ec;
+      font-synthesis: none;
+      --ink: #172222;
+      --muted: #6f7c78;
+      --line: #e2e8e2;
+      --accent: #cf5438;
+      --accent-dark: #ad3d25;
+      --deep: #142725;
+      --card: #fff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 0; }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    .shell { display: grid; grid-template-columns: 232px minmax(0,1fr); min-height: 100vh; max-width: 1800px; margin: auto; box-shadow: 0 0 70px #27433a12; }
+    aside { background: var(--deep); color: #e8f0e9; padding: 30px 18px 24px; display: flex; flex-direction: column; gap: 28px; }
+    .brand { display: flex; align-items: center; gap: 12px; padding: 0 10px; }
+    .brand-mark { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; background: #d55539; color: white; font-size: 17px; font-weight: 900; letter-spacing: -.15em; padding-right: 3px; box-shadow: 0 9px 18px #050d0b38; }
+    .brand-name { font-size: 18px; letter-spacing: -.035em; font-weight: 760; line-height: 1; }
+    .brand-sub { color: #9aacaa; font-size: 10px; letter-spacing: .18em; margin-top: 7px; font-weight: 700; }
+    .nav-label { padding: 0 14px; color: #809895; font-size: 10px; letter-spacing: .17em; font-weight: 800; margin-bottom: 9px; }
+    .nav-item { border: 0; width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; padding: 12px 13px; color: #bfd0cb; border-radius: 11px; background: transparent; font-size: 13px; font-weight: 600; transition: background .15s, color .15s; }
+    .nav-item:hover { background: #28403c; color: #fff; }
+    .nav-item.active { background: #31504a; color: #fff; box-shadow: inset 3px 0 #ed7657; }
+    .nav-item svg { width: 17px; height: 17px; stroke-width: 1.8; flex: none; }
+    .nav-count { margin-left: auto; font-size: 10px; color: #c3d4d0; background: #ffffff20; padding: 3px 7px; border-radius: 7px; }
+    .sidebar-bottom { margin-top: auto; padding: 0 11px; }
+    .device-card { border: 1px solid #ffffff1e; border-radius: 13px; padding: 13px; background: #ffffff0b; }
+    .device-top { display: flex; gap: 8px; align-items: center; color: #d9e8e2; font-size: 11px; font-weight: 700; }
+    .device-dot { width: 7px; height: 7px; background: #74d1a4; border-radius: 50%; box-shadow: 0 0 0 4px #74d1a425; }
+    .device-card p { margin: 9px 0 0; color: #91a8a1; font-size: 11px; line-height: 1.55; }
+    .sidebar-foot { color: #708782; font-size: 10px; margin-top: 20px; }
+    main { background: #f5f7f3; padding: 0 36px 46px; min-width: 0; }
+    .topline { height: 74px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8e1; }
+    .crumb { color: #8b9690; font-size: 12px; } .crumb b { color: #263430; margin-left: 10px; font-weight: 700; }
+    .top-right { display: flex; align-items: center; gap: 11px; color: #84918b; font-size: 11px; }
+    .sample-pill { color: #a34b36; background: #fce9e3; border: 1px solid #f3d3c8; padding: 6px 10px; border-radius: 99px; font-weight: 700; }
+    .user-circle { width: 31px; height: 31px; border-radius: 9px; background: #e5e9e2; color: #60716b; display: grid; place-items: center; font-size: 11px; font-weight: 800; }
+    .page-intro { display: flex; justify-content: space-between; align-items: end; gap: 20px; margin: 33px 0 25px; }
+    .eyebrow { margin: 0 0 7px; color: var(--accent); font-size: 10px; letter-spacing: .19em; font-weight: 850; }
+    h1 { margin: 0; font-size: clamp(28px, 3vw, 35px); line-height: 1.17; font-weight: 780; letter-spacing: -.055em; }
+    .intro-desc { margin: 10px 0 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+    .btn { border: 1px solid transparent; border-radius: 9px; height: 36px; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-size: 11px; font-weight: 730; white-space: nowrap; transition: transform .12s, background .12s, border-color .12s, opacity .12s; }
+    .btn:hover:not(:disabled) { transform: translateY(-1px); }
+    .btn:disabled { cursor: not-allowed; opacity: .48; }
+    .btn svg { width: 14px; height: 14px; stroke-width: 2; }
+    .btn-primary { background: var(--accent); color: white; box-shadow: 0 5px 10px #d5533524; } .btn-primary:hover:not(:disabled) { background: var(--accent-dark); }
+    .btn-light { background: white; color: #35453f; border-color: #dce4dc; } .btn-light:hover:not(:disabled) { border-color: #a9bbb1; }
+    .btn-plain { background: transparent; color: #52645c; } .btn-plain:hover { background: #ecf1eb; }
+    .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; }
+    .stat { background: #fff; border: 1px solid #e5eae4; border-radius: 14px; min-height: 111px; padding: 17px 20px; position: relative; overflow: hidden; box-shadow: 0 3px 16px #30433308; }
+    .stat::after { content:""; position: absolute; right: -33px; top: -42px; width: 110px; height: 110px; border-radius: 50%; background: #edf3ef; }
+    .stat.warm::after { background: #fdf0ea; }
+    .stat-label { color: #718079; font-size: 11px; font-weight: 650; }
+    .stat-value { margin-top: 7px; font-size: 30px; font-weight: 780; letter-spacing: -.055em; line-height: 1; }
+    .stat-note { margin-top: 9px; color: #95a29a; font-size: 10px; }
+    .stat-accent { color: var(--accent); }
+    .workspace { margin-top: 23px; background: white; border: 1px solid #e3e9e1; border-radius: 15px; box-shadow: 0 6px 22px #233c2910; overflow: hidden; }
+    .workspace-head { padding: 21px 22px 17px; display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+    h2 { font-size: 16px; margin: 0; letter-spacing: -.025em; }
+    .head-sub { color: #98a49c; margin: 5px 0 0; font-size: 11px; }
+    .toolbar { display: flex; align-items: center; gap: 9px; padding: 0 22px 17px; flex-wrap: wrap; }
+    .search { height: 36px; width: min(280px, 35vw); display: flex; align-items: center; gap: 8px; border: 1px solid #dfe6df; border-radius: 9px; padding: 0 11px; background: #f9fbf8; }
+    .search svg { width: 15px; color: #8c9b90; flex: none; }
+    .search input { background: transparent; border: none; outline: none; width: 100%; font-size: 11px; color: #24332d; }
+    .search input::placeholder { color: #a4afa7; }
+    .filter { height: 36px; border: 1px solid #dfe6df; border-radius: 9px; padding: 0 9px; color: #52645a; background: #fff; font-size: 11px; outline-color: #d36d52; }
+    .toolbar-spacer { flex: 1; }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; min-width: 790px; }
+    thead { background: #f8faf7; color: #819087; font-size: 10px; letter-spacing: .04em; text-align: left; }
+    th { height: 40px; font-weight: 740; border-top: 1px solid #edf0ec; border-bottom: 1px solid #edf0ec; }
+    th:first-child, td:first-child { width: 47px; padding-left: 22px; }
+    td { height: 78px; border-bottom: 1px solid #edf0ec; font-size: 11px; color: #617169; }
+    tr:last-child td { border-bottom: 0; }
+    tbody tr { transition: background .12s; } tbody tr:hover { background: #fbfcfa; }
+    tbody tr.selected { background: #fff9f5; }
+    input[type="checkbox"] { width: 15px; height: 15px; accent-color: #d25639; cursor: pointer; vertical-align: middle; }
+    .source { display: flex; align-items: center; gap: 12px; }
+    .source-icon { width: 35px; height: 35px; border-radius: 10px; display: grid; place-items: center; font-size: 11px; font-weight: 850; flex: none; }
+    .source-icon.bjm { color: #3a6b64; background: #e9f2ee; } .source-icon.fire { color: #c55a35; background: #fff0e8; } .source-icon.fer { color: #6d5f9e; background: #f0eefa; } .source-icon.merged { color: #2c6397; background: #e9f2fa; } .source-icon.other { color: #66736b; background: #eef1ed; }
+    .source-name { color: #23322c; font-weight: 760; font-size: 12px; margin-bottom: 5px; white-space: nowrap; }
+    .source-sub { font-size: 10px; color: #96a29a; max-width: 190px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+    .player-name { color: #314238; font-weight: 740; font-size: 11px; margin-bottom: 4px; }
+    .mono { font-family: Consolas, "Cascadia Code", monospace; letter-spacing: .01em; font-size: 10px; }
+    .count { font-size: 12px; color: #26382f; font-weight: 750; }
+    .count-sub { font-size: 10px; color: #9aa59e; margin-top: 4px; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; border-radius: 6px; padding: 5px 7px; background: #edf6f0; color: #3a8260; font-size: 10px; font-weight: 700; white-space: nowrap; }
+    .badge::before { content:""; width: 5px; height: 5px; background: currentColor; border-radius: 50%; }
+    .badge.merged { background: #eaf1f9; color: #466f9d; }
+    .row-actions { display: flex; gap: 3px; }
+    .icon-btn { width: 29px; height: 29px; border: 0; background: transparent; color: #87958b; border-radius: 7px; display: grid; place-items: center; }
+    .icon-btn:hover { background: #f0f3ef; color: #304a3a; }
+    .icon-btn svg { width: 15px; height: 15px; stroke-width: 1.8; }
+    .empty { display: none; padding: 60px 16px; text-align: center; color: #8e9a91; font-size: 12px; }
+    .empty.show { display: block; }
+    .workspace-foot { min-height: 53px; border-top: 1px solid #edf0ec; display: flex; align-items: center; justify-content: space-between; padding: 0 22px; color: #96a39a; font-size: 10px; }
+    .selected-count { color: #be5137; font-weight: 750; }
+    .note { margin-top: 14px; color: #8c9a90; font-size: 10px; line-height: 1.6; display: flex; gap: 7px; align-items: flex-start; }
+    .note svg { width: 14px; height: 14px; flex: none; margin-top: 1px; }
+    .modal-backdrop { display: none; position: fixed; inset: 0; background: #0f211db5; backdrop-filter: blur(3px); z-index: 20; align-items: center; justify-content: center; padding: 22px; }
+    .modal-backdrop.open { display: flex; }
+    .modal { width: min(440px, 100%); background: white; border-radius: 17px; box-shadow: 0 25px 80px #0d181855; padding: 25px; }
+    .modal-icon { width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center; background: #f9ece6; color: var(--accent); margin-bottom: 15px; }
+    .modal h3 { margin: 0; font-size: 19px; letter-spacing: -.035em; }
+    .modal p { color: #728078; font-size: 11px; line-height: 1.6; margin: 8px 0 18px; }
+    .field-label { display: block; font-size: 10px; color: #5c6e63; font-weight: 750; margin-bottom: 7px; }
+    .modal input { width: 100%; border: 1px solid #dce4dc; border-radius: 8px; height: 38px; padding: 0 11px; outline-color: #d36950; font-size: 12px; }
+    .modal-info { background: #f7f9f6; border: 1px solid #e9eee7; border-radius: 9px; padding: 11px 12px; color: #687a6d; font-size: 11px; line-height: 1.6; margin-top: 14px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 21px; }
+    .toast { position: fixed; right: 25px; bottom: 23px; z-index: 30; border-radius: 10px; background: #18342e; color: white; font-size: 11px; padding: 12px 16px; box-shadow: 0 14px 30px #0e1c1850; opacity: 0; transform: translateY(10px); pointer-events: none; transition: opacity .2s, transform .2s; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    @media (max-width: 1080px) { main { padding: 0 22px 35px; } .shell { grid-template-columns: 190px minmax(0,1fr); } aside { padding-left: 12px; padding-right: 12px; } .stat-grid { gap: 9px; } .stat { padding: 16px; } }
+    @media (max-width: 800px) { .shell { grid-template-columns: 64px minmax(0,1fr); } aside { padding: 22px 9px; } .brand { padding: 0; justify-content: center; } .brand-name, .brand-sub, .nav-label, .nav-item span, .nav-count, .sidebar-bottom { display: none; } .nav-item { justify-content: center; padding: 12px; } .nav-item svg { width: 19px; height: 19px; } .page-intro { align-items: start; flex-wrap: wrap; } .stat-grid { grid-template-columns: repeat(3,1fr); } .stat-value { font-size: 24px; } }
+    @media (max-width: 600px) { main { padding: 0 13px 28px; } .topline { height: 60px; } .top-right > span:not(.sample-pill), .user-circle { display: none; } .page-intro { margin: 25px 0 20px; } h1 { font-size: 26px; } .intro-desc { max-width: 40ch; } .stat-grid { gap: 7px; } .stat { min-height: 94px; padding: 12px 9px; } .stat-label { font-size: 10px; } .stat-value { font-size: 21px; } .stat-note { font-size: 9px; } .workspace-head { padding: 17px 13px; } .toolbar { padding: 0 13px 13px; } .search { width: 100%; } .toolbar-spacer { display: none; } .workspace-foot { padding: 0 13px; } }
+  </style>
+</head>
+<body>
+  <svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+    <symbol id="i-merge" viewBox="0 0 24 24"><path d="M4 5h4a4 4 0 0 1 4 4v6a4 4 0 0 0 4 4h4"/><path d="m17 16 3 3-3 3M4 19h4a4 4 0 0 0 4-4V9a4 4 0 0 1 4-4h4m-3-3 3 3-3 3"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 13.5a1.5 1.5 0 0 0 .3 1.65l.1.1-2.1 2.1-.1-.1A1.5 1.5 0 0 0 15.5 17l-.7.3-.3 2.7h-3l-.3-2.7-.7-.3a1.5 1.5 0 0 0-1.7.25l-.1.1-2.1-2.1.1-.1A1.5 1.5 0 0 0 7 13.5l-.3-.7L4 12.5v-3l2.7-.3.3-.7a1.5 1.5 0 0 0-.25-1.7l-.1-.1 2.1-2.1.1.1A1.5 1.5 0 0 0 10.5 5l.7-.3.3-2.7h3l.3 2.7.7.3a1.5 1.5 0 0 0 1.7-.25l.1-.1 2.1 2.1-.1.1A1.5 1.5 0 0 0 19 8.5l.3.7 2.7.3v3l-2.7.3z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m-4-4 4 4 4-4M4 17v3h16v-3"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 17 1-5L16 1l7 7-11 11-5 1-3-3Z"/><path d="m13 4 7 7"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M5 5 19 19M19 5 5 19"/></symbol>
+  </svg>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="brand-mark">A/F</div><div><div class="brand-name">AnyToFire</div><div class="brand-sub">SCORE STUDIO</div></div></div>
+      <nav aria-label="主导航"><div class="nav-label">工作区</div>
+        <button class="nav-item active" type="button"><svg fill="none" stroke="currentColor"><use href="#i-grid"/></svg><span>成绩库</span><span class="nav-count" id="nav-count">04</span></button>
+        <button class="nav-item" type="button" data-nav="exports"><svg fill="none" stroke="currentColor"><use href="#i-folder"/></svg><span>导出记录</span></button>
+        <button class="nav-item" type="button" data-nav="merges"><svg fill="none" stroke="currentColor"><use href="#i-merge"/></svg><span>合并记录</span></button>
+        <button class="nav-item" type="button" data-nav="settings"><svg fill="none" stroke="currentColor"><use href="#i-settings"/></svg><span>偏好设置</span></button>
+      </nav>
+      <div class="sidebar-bottom"><div class="device-card"><div class="device-top"><span class="device-dot"></span> 本地模式</div><p>演示数据仅保存在当前页面，不会连接服务器或读取你的游戏目录。</p></div><div class="sidebar-foot">IIDX 34 · INTERFACE CONCEPT</div></div>
+    </aside>
+    <main>
+      <div class="topline"><div class="crumb">工作区 <span aria-hidden="true">/</span><b>成绩库</b></div><div class="top-right"><span class="sample-pill">交互 Demo</span><span>桌面版界面提案</span><div class="user-circle">AF</div></div></div>
+      <section class="page-intro"><div><div class="eyebrow">YOUR SCORE ARCHIVE</div><h1>每一份成绩，都有迹可循。</h1><p class="intro-desc">整理来自不同 EA 服务器的成绩，比较、合并，然后导出你需要的格式。</p></div><button class="btn btn-primary" id="hero-merge" type="button" disabled><svg fill="none" stroke="currentColor"><use href="#i-merge"/></svg> 合并所选 <span id="hero-selected">0</span></button></section>
+      <section class="stat-grid" aria-label="成绩概览"><div class="stat"><div class="stat-label">已保存成绩集</div><div class="stat-value" id="stat-sets">4</div><div class="stat-note">包含独立导出与合并结果</div></div><div class="stat warm"><div class="stat-label">谱面记录总数</div><div class="stat-value stat-accent" id="stat-charts">8,928</div><div class="stat-note">按各成绩集分别统计</div></div><div class="stat"><div class="stat-label">来源服务器</div><div class="stat-value" id="stat-servers">3</div><div class="stat-note">识别 EA URL 自动命名</div></div></section>
+      <section class="workspace"><div class="workspace-head"><div><h2>成绩库</h2><p class="head-sub">选择一份导出，或多选后合并</p></div><button class="btn btn-light" id="refresh" type="button">刷新列表</button></div>
+        <div class="toolbar"><label class="search"><svg fill="none" stroke="currentColor"><use href="#i-search"/></svg><input id="search" placeholder="搜索名称、昵称或 IIDX ID" autocomplete="off" aria-label="搜索成绩"></label><select class="filter" id="source-filter" aria-label="按来源筛选"><option value="all">全部来源</option><option value="BJM">BJM</option><option value="Firenet">Firenet</option><option value="Fervidex">Fervidex</option><option value="合并">合并成绩</option></select><select class="filter" id="sort" aria-label="排序"><option value="newest">最近导出</option><option value="oldest">最早导出</option><option value="charts">谱面数量</option></select><div class="toolbar-spacer"></div><button class="btn btn-light" id="export-selected" type="button" disabled><svg fill="none" stroke="currentColor"><use href="#i-download"/></svg> 导出所选</button></div>
+        <div class="table-wrap"><table><thead><tr><th><input id="select-all" type="checkbox" aria-label="选择当前列表全部成绩"></th><th>成绩来源</th><th>玩家</th><th>谱面</th><th>类型</th><th>导出时间</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table><div class="empty" id="empty">没有匹配的成绩。试试更换搜索词或筛选条件。</div></div>
+        <div class="workspace-foot"><span id="visible-count">显示 4 份成绩</span><span class="selected-count" id="selection-status">尚未选择</span></div></section>
+      <div class="note"><svg fill="none" stroke="currentColor"><use href="#i-info"/></svg><span>这是界面交互演示，列表中的姓名和分数均为示例。正式版将读取本机 AnyToFire_exports，导出操作会打开系统“另存为”对话框。</span></div>
+    </main>
+  </div>
+  <div class="modal-backdrop" id="modal-backdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-icon" id="modal-icon"><svg width="19" height="19" fill="none" stroke="currentColor"><use href="#i-merge"/></svg></div><h3 id="modal-title"></h3><p id="modal-desc"></p><label class="field-label" for="modal-input" id="modal-label"></label><input id="modal-input" maxlength="80"><div class="modal-info" id="modal-info"></div><div class="modal-actions"><button class="btn btn-plain" id="modal-cancel" type="button">取消</button><button class="btn btn-primary" id="modal-confirm" type="button">确认</button></div></div></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script>
+    const demo = [
+      { id: 'bjm-1', name: 'BJM · 秋季存档', source: 'BJM', url: 'http://server.bjmania.com:20573/core/', player: 'REN*', iidx: '2486-7153', charts: 2486, sp: 1394, dp: 1092, date: '2026-10-20 19:42', kind: '原始导出', parents: [] },
+      { id: 'fire-1', name: 'Firenet', source: 'Firenet', url: 'https://firenet.example/core/', player: 'REN*', iidx: '2486-7153', charts: 2318, sp: 1270, dp: 1048, date: '2026-10-18 23:16', kind: '原始导出', parents: [] },
+      { id: 'fer-1', name: 'Fervidex', source: 'Fervidex', url: 'https://fervidex.example/core/', player: 'REN*', iidx: '2486-7153', charts: 2074, sp: 1145, dp: 929, date: '2026-10-16 15:08', kind: '原始导出', parents: [] },
+      { id: 'bjm-2', name: 'BJM · 九月备份', source: 'BJM', url: 'http://server.bjmania.com:20573/core/', player: 'REN*', iidx: '2486-7153', charts: 2050, sp: 1121, dp: 929, date: '2026-09-29 21:37', kind: '原始导出', parents: [] }
+    ];
+    let items = demo.map(x => ({...x}));
+    const selection = new Set();
+    let activeModal = null;
+    const el = id => document.getElementById(id);
+    const icon = (name, cls = '') => `<svg class="${cls}" fill="none" stroke="currentColor"><use href="#i-${name}"/></svg>`;
+    const escapeHtml = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+    const iconClass = item => item.source === 'BJM' ? 'bjm' : item.source === 'Firenet' ? 'fire' : item.source === 'Fervidex' ? 'fer' : item.source === '合并' ? 'merged' : 'other';
+    const iconText = item => item.source === 'BJM' ? 'BJ' : item.source === 'Firenet' ? 'FN' : item.source === 'Fervidex' ? 'FV' : item.source === '合并' ? 'M' : 'EA';
+    function filtered() {
+      const query = el('search').value.trim().toLocaleLowerCase();
+      const source = el('source-filter').value;
+      const order = el('sort').value;
+      return items.filter(x => (source === 'all' || x.source === source) && (!query || [x.name,x.player,x.iidx,x.url].some(v => v.toLocaleLowerCase().includes(query)))).sort((a,b) => order === 'charts' ? b.charts-a.charts : order === 'oldest' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
+    }
+    function render() {
+      const visible = filtered();
+      el('rows').innerHTML = visible.map(item => `<tr class="${selection.has(item.id) ? 'selected' : ''}">
+        <td><input type="checkbox" class="row-check" data-id="${escapeHtml(item.id)}" aria-label="选择 ${escapeHtml(item.name)}" ${selection.has(item.id) ? 'checked' : ''}></td>
+        <td><div class="source"><div class="source-icon ${iconClass(item)}">${iconText(item)}</div><div><div class="source-name">${escapeHtml(item.name)}</div><div class="source-sub" title="${escapeHtml(item.url)}">${escapeHtml(item.url)}</div></div></div></td>
+        <td><div class="player-name">${escapeHtml(item.player)}</div><div class="mono">${escapeHtml(item.iidx)}</div></td>
+        <td><div class="count">${item.charts.toLocaleString()}</div><div class="count-sub">SP ${item.sp.toLocaleString()} · DP ${item.dp.toLocaleString()}</div></td>
+        <td><span class="badge ${item.kind === '合并结果' ? 'merged' : ''}">${escapeHtml(item.kind)}</span></td>
+        <td class="mono">${escapeHtml(item.date)}</td>
+        <td><div class="row-actions"><button class="icon-btn row-export" data-id="${escapeHtml(item.id)}" title="导出" aria-label="导出 ${escapeHtml(item.name)}">${icon('download')}</button><button class="icon-btn row-rename" data-id="${escapeHtml(item.id)}" title="重命名" aria-label="重命名 ${escapeHtml(item.name)}">${icon('edit')}</button></div></td>
+      </tr>`).join('');
+      el('empty').classList.toggle('show', visible.length === 0);
+      el('visible-count').textContent = `显示 ${visible.length} 份成绩`;
+      const selected = selection.size;
+      el('selection-status').textContent = selected ? `已选择 ${selected} 份` : '尚未选择';
+      el('hero-selected').textContent = selected;
+      el('hero-merge').disabled = selected < 2;
+      el('export-selected').disabled = selected !== 1;
+      el('select-all').checked = visible.length > 0 && visible.every(x => selection.has(x.id));
+      el('select-all').indeterminate = visible.some(x => selection.has(x.id)) && !el('select-all').checked;
+      el('stat-sets').textContent = items.length;
+      el('stat-charts').textContent = items.reduce((n,x) => n + x.charts, 0).toLocaleString();
+      el('stat-servers').textContent = new Set(items.filter(x => x.source !== '合并').map(x => x.source)).size;
+      el('nav-count').textContent = String(items.length).padStart(2,'0');
+    }
+    function toast(message) { el('toast').textContent = message; el('toast').classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => el('toast').classList.remove('show'), 3200); }
+    function openModal(config) {
+      activeModal = config;
+      el('modal-title').textContent = config.title; el('modal-desc').textContent = config.desc;
+      el('modal-label').textContent = config.label; el('modal-input').value = config.value || '';
+      el('modal-input').style.display = config.input === false ? 'none' : '';
+      el('modal-label').style.display = config.input === false ? 'none' : '';
+      el('modal-info').innerHTML = config.info;
+      el('modal-confirm').textContent = config.action;
+      el('modal-backdrop').classList.add('open');
+      if (config.input !== false) setTimeout(() => { el('modal-input').focus(); el('modal-input').select(); }, 30);
+    }
+    function closeModal() { el('modal-backdrop').classList.remove('open'); activeModal = null; }
+    function mergeDialog() {
+      const chosen = items.filter(x => selection.has(x.id));
+      if (chosen.length < 2) return;
+      if (new Set(chosen.map(x => x.iidx)).size !== 1) { toast('IIDX ID 不同，无法合并'); return; }
+      openModal({ type:'merge', title:'合并所选成绩', desc:`将 ${chosen.length} 份成绩合并为一份新记录；原始成绩仍会保留。`, label:'新成绩名称', value:'合并成绩 · 2026-10-20', action:'创建合并成绩', info:`<strong>${chosen.length} 份来源</strong> · ${chosen.reduce((n,x)=>n+x.charts,0).toLocaleString()} 条输入记录<br>正式版会在下一步让你选择 JSON 和 CSV 的保存位置。` });
+    }
+    function renameDialog(id) { const item = items.find(x => x.id === id); if (!item) return; openModal({ type:'rename', id, title:'重命名成绩', desc:'名称只用于本地识别，不会修改原始分数。', label:'成绩名称', value:item.name, action:'保存名称', info:`来源：${escapeHtml(item.source)}<br>IIDX ID：${escapeHtml(item.iidx)}` }); }
+    function exportDialog(id) { const item = items.find(x => x.id === id); if (!item) return; openModal({ type:'export', id, title:'导出成绩', desc:`${item.name} · ${item.charts.toLocaleString()} 张谱面`, label:'', input:false, action:'模拟导出', info:'正式版会提供 <strong>Fervidex JSON</strong> 和 <strong>KONAMI CSV</strong> 两种格式，并打开系统“另存为”对话框。' }); }
+    function confirmModal() {
+      if (!activeModal) return;
+      const config = activeModal; const value = el('modal-input').value.trim();
+      if (config.type === 'merge') {
+        if (!value) { toast('请填写新成绩名称'); return; }
+        const chosen = items.filter(x => selection.has(x.id));
+        const max = Math.max(...chosen.map(x => x.charts));
+        const merged = { id:`merged-${Date.now()}`, name:value, source:'合并', url:'由所选成绩合并', player:chosen[0].player, iidx:chosen[0].iidx, charts:max + Math.round((chosen.reduce((n,x)=>n+x.charts,0)-max)*.12), sp:Math.max(...chosen.map(x=>x.sp))+48, dp:Math.max(...chosen.map(x=>x.dp))+35, date:new Date().toLocaleString('sv-SE').replace('T',' ').slice(0,16), kind:'合并结果', parents:chosen.map(x=>x.id) };
+        items.unshift(merged); selection.clear(); render(); toast('演示：合并记录已加入列表，原始成绩保留');
+      } else if (config.type === 'rename') {
+        if (!value) { toast('名称不能为空'); return; }
+        items.find(x => x.id === config.id).name = value; render(); toast('名称已更新（仅本次演示）');
+      } else if (config.type === 'export') toast('演示：正式版将在此选择格式和保存位置');
+      closeModal();
+    }
+    el('rows').addEventListener('change', event => { if (!event.target.matches('.row-check')) return; event.target.checked ? selection.add(event.target.dataset.id) : selection.delete(event.target.dataset.id); render(); });
+    el('rows').addEventListener('click', event => { const exportButton = event.target.closest('.row-export'); const renameButton = event.target.closest('.row-rename'); if (exportButton) exportDialog(exportButton.dataset.id); if (renameButton) renameDialog(renameButton.dataset.id); });
+    el('select-all').addEventListener('change', event => { filtered().forEach(x => event.target.checked ? selection.add(x.id) : selection.delete(x.id)); render(); });
+    ['search','source-filter','sort'].forEach(id => el(id).addEventListener(id === 'search' ? 'input' : 'change', render));
+    el('hero-merge').addEventListener('click', mergeDialog);
+    el('export-selected').addEventListener('click', () => { const id = [...selection][0]; if (id) exportDialog(id); });
+    el('refresh').addEventListener('click', () => { render(); toast('演示数据已刷新'); });
+    document.querySelectorAll('[data-nav]').forEach(button => button.addEventListener('click', () => toast('当前为成绩库界面演示，其余页面尚未设计')));
+    el('modal-cancel').addEventListener('click', closeModal); el('modal-confirm').addEventListener('click', confirmModal);
+    el('modal-backdrop').addEventListener('click', event => { if (event.target === el('modal-backdrop')) closeModal(); });
+    document.addEventListener('keydown', event => { if (event.key === 'Escape') closeModal(); if (event.key === 'Enter' && activeModal) confirmModal(); });
+    render();
+  </script>
+</body>
+</html>
