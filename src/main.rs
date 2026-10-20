@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 use anytofire::core::{self, Collection};
+use anytofire::formats;
 use std::ffi::c_void;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,7 +47,7 @@ extern "system" {
     fn SetWindowTextW(hwnd: Hwnd, text: *const u16) -> i32;
 }
 #[link(name="kernel32")] extern "system" { fn GetModuleHandleW(name: *const u16) -> Hinst; }
-#[link(name="comdlg32")] extern "system" { fn GetSaveFileNameW(ofn: *mut OpenFileName) -> i32; }
+#[link(name="comdlg32")] extern "system" { fn GetSaveFileNameW(ofn: *mut OpenFileName) -> i32; fn GetOpenFileNameW(ofn: *mut OpenFileName) -> i32; }
 #[link(name="gdi32")] extern "system" { fn GetStockObject(index: i32) -> Hwnd; }
 
 struct App { root: PathBuf, items: Vec<Collection>, list: Hwnd, edit: Hwnd, status: Hwnd }
@@ -75,24 +76,25 @@ fn selected(app: &App) -> Vec<usize> {
     let n = unsafe { SendMessageW(app.list, LB_GETSELITEMS, indices.len(), indices.as_mut_ptr() as isize) };
     indices.into_iter().take(n.max(0) as usize).filter_map(|x| (x >= 0 && (x as usize) < app.items.len()).then_some(x as usize)).collect()
 }
-fn save_path(hwnd: Hwnd, suggested: &str, json: bool) -> Option<PathBuf> {
+fn file_path(hwnd: Hwnd, suggested: &str, ext_name: &str, open: bool) -> Option<PathBuf> {
     let mut file = vec![0u16; 32768]; let initial = wide(suggested); file[..initial.len()].copy_from_slice(&initial);
-    let filter = if json { wide("JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0") } else { wide("CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0") };
+    let filter = if open { wide("成绩文件 (*.json;*.csv;*.db)\0*.json;*.csv;*.db\0所有文件 (*.*)\0*.*\0") } else { match ext_name { "json" => wide("JSON 文件 (*.json)\0*.json\0所有文件 (*.*)\0*.*\0"), "csv" => wide("CSV 文件 (*.csv)\0*.csv\0所有文件 (*.*)\0*.*\0"), _ => wide("Asphyxia DB (*.db)\0*.db\0所有文件 (*.*)\0*.*\0") } };
     // wide() adds the final NUL; embedded NULs are intentional Win32 filter separators.
-    let ext = if json { wide("json") } else { wide("csv") };
-    let title = wide("选择另存为位置");
+    let ext = wide(ext_name);
+    let title = wide(if open { "选择要导入的成绩" } else { "选择另存为位置" });
     let mut ofn = OpenFileName { struct_size: std::mem::size_of::<OpenFileName>() as u32, owner: hwnd, instance: std::ptr::null_mut(), filter: filter.as_ptr(), custom_filter: std::ptr::null_mut(), max_custom_filter: 0, filter_index: 1, file: file.as_mut_ptr(), max_file: file.len() as u32, file_title: std::ptr::null_mut(), max_file_title: 0, initial_dir: std::ptr::null(), title: title.as_ptr(), flags: OFN_OVERWRITEPROMPT, file_offset: 0, file_extension: 0, default_ext: ext.as_ptr(), cust_data: 0, hook: std::ptr::null_mut(), template_name: std::ptr::null(), reserved: std::ptr::null_mut(), reserved_dword: 0, flags_ex: 0 };
-    if unsafe { GetSaveFileNameW(&mut ofn) } == 0 { return None; }
+    if unsafe { if open { GetOpenFileNameW(&mut ofn) } else { GetSaveFileNameW(&mut ofn) } } == 0 { return None; }
     let n = file.iter().position(|x| *x == 0).unwrap_or(0);
     Some(PathBuf::from(String::from_utf16_lossy(&file[..n])))
 }
+fn save_path(hwnd: Hwnd, suggested: &str, ext: &str) -> Option<PathBuf> { file_path(hwnd, suggested, ext, false) }
 fn export_json(hwnd: Hwnd, item: &Collection) -> Result<(), String> {
-    let Some(path) = save_path(hwnd, &format!("{}.json", item.name), true) else { return Ok(()); };
+    let Some(path) = save_path(hwnd, &format!("{}.json", item.name), "json") else { return Ok(()); };
     fs::write(&path, core::fervidex_json(item).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     popup(hwnd, &format!("已保存 {}", path.display()), false); Ok(())
 }
 fn export_csv(hwnd: Hwnd, item: &Collection) -> Result<(), String> {
-    let Some(path) = save_path(hwnd, &format!("{}.csv", item.name), false) else { return Ok(()); };
+    let Some(path) = save_path(hwnd, &format!("{}.csv", item.name), "csv") else { return Ok(()); };
     let has_sp = item.scores.iter().any(|s| s.chart < 5); let has_dp = item.scores.iter().any(|s| s.chart >= 5);
     if has_sp && has_dp {
         let stem = path.file_stem().and_then(|x| x.to_str()).unwrap_or("scores");
@@ -106,16 +108,34 @@ fn export_csv(hwnd: Hwnd, item: &Collection) -> Result<(), String> {
     }
     Ok(())
 }
+fn export_asphyxia(hwnd: Hwnd, item: &Collection) -> Result<(), String> {
+    let Some(path) = save_path(hwnd, &format!("{}.db", item.name), "db") else { return Ok(()); };
+    if path.exists() { return Err("请选择一个新的 .db 文件名；不会覆盖现有 Asphyxia 数据库".into()); }
+    fs::write(&path, formats::asphyxia_db(item).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    popup(hwnd, &format!("已保存 {}", path.display()), false); Ok(())
+}
+fn import_scores(hwnd: Hwnd, app: &mut App) -> Result<(), String> {
+    let Some(path) = file_path(hwnd, "", "", true) else { return Ok(()); };
+    let catalog_path = app.root.parent().unwrap_or(Path::new(".")).join("data/info/0/music_data.bin");
+    let catalog = core::read_catalog(&catalog_path).map_err(|e| format!("无法读取曲库索引 {}: {e}", catalog_path.display()))?;
+    let imported = formats::import_path(&path, &catalog).map_err(|e| format!("导入失败: {e}"))?;
+    let count = imported.collections.len();
+    for item in &imported.collections { core::write_collection(&app.root, item).map_err(|e| e.to_string())?; }
+    refresh(app); popup(hwnd, &format!("已导入 {count} 份成绩，跳过 {} 项无法映射的曲目或谱面", imported.skipped), false); Ok(())
+}
 fn merge_selected(hwnd: Hwnd, app: &mut App, indices: &[usize]) -> Result<(), String> {
     let sources: Vec<Collection> = indices.iter().map(|&i| app.items[i].clone()).collect();
     let merged = core::merge(&sources, "合并成绩".into())?;
-    let Some(json_path) = save_path(hwnd, "合并成绩.json", true) else { return Ok(()); };
+    let Some(json_path) = save_path(hwnd, "合并成绩.json", "json") else { return Ok(()); };
     let target_dir = json_path.parent().ok_or("目标路径无效")?;
-    fs::write(&json_path, core::fervidex_json(&merged).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     let stem = json_path.file_stem().and_then(|x| x.to_str()).unwrap_or("合并成绩");
     let sp = target_dir.join(format!("{stem}_SP.csv")); let dp = target_dir.join(format!("{stem}_DP.csv"));
+    let db = target_dir.join(format!("{stem}.db"));
+    if sp.exists() || dp.exists() || db.exists() { return Err("目标目录已有同名 CSV 或 DB；请更换合并文件名".into()); }
+    fs::write(&json_path, core::fervidex_json(&merged).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     fs::write(&sp, core::konami_csv(&merged, 0).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     fs::write(&dp, core::konami_csv(&merged, 1).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    fs::write(&db, formats::asphyxia_db(&merged).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     core::write_collection(&app.root, &merged).map_err(|e| e.to_string())?;
     refresh(app); popup(hwnd, &format!("已合并 {} 份成绩，原成绩保留。\n保存至 {}", sources.len(), target_dir.display()), false); Ok(())
 }
@@ -131,6 +151,8 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> 
                 102 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else { export_json(hwnd, &app.items[indices[0]]) } }
                 103 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else { export_csv(hwnd, &app.items[indices[0]]) } }
                 104 => merge_selected(hwnd, app, &indices),
+                106 => import_scores(hwnd, app),
+                107 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else { export_asphyxia(hwnd, &app.items[indices[0]]) } }
                 105 => { if indices.len() != 1 { Err("请选择一份成绩".into()) } else {
                     let name = text_of(app.edit).trim().to_string();
                     if name.is_empty() { Err("请输入新名称".into()) } else {
@@ -159,10 +181,12 @@ fn main() {
     if unsafe { RegisterClassW(&wc) } == 0 { return; }
     let hwnd = unsafe { CreateWindowExW(0, class.as_ptr(), wide("AnyToFire · 成绩管理").as_ptr(), WS_OVERLAPPEDWINDOW, 100,100,940,560,std::ptr::null_mut(),std::ptr::null_mut(),instance,std::ptr::null_mut()) };
     if hwnd.is_null() { return; }
-    control(hwnd,"BUTTON","刷新",101,20,18,78,34,0,instance);
-    control(hwnd,"BUTTON","导出 Fervidex JSON",102,110,18,168,34,0,instance);
-    control(hwnd,"BUTTON","导出 KONAMI CSV",103,290,18,168,34,0,instance);
-    control(hwnd,"BUTTON","合并选中成绩",104,470,18,150,34,0,instance);
+    control(hwnd,"BUTTON","刷新",101,20,18,68,34,0,instance);
+    control(hwnd,"BUTTON","导入成绩",106,98,18,92,34,0,instance);
+    control(hwnd,"BUTTON","导出 Fervidex JSON",102,200,18,150,34,0,instance);
+    control(hwnd,"BUTTON","导出 KONAMI CSV",103,360,18,150,34,0,instance);
+    control(hwnd,"BUTTON","导出 Asphyxia DB",107,520,18,150,34,0,instance);
+    control(hwnd,"BUTTON","合并选中成绩",104,680,18,145,34,0,instance);
     let list = control(hwnd,"LISTBOX","",201,20,64,882,365,WS_BORDER | WS_VSCROLL | LBS_EXTENDEDSEL,instance);
     let edit = control(hwnd,"EDIT","",202,20,445,350,30,WS_BORDER | ES_AUTOHSCROLL,instance);
     control(hwnd,"BUTTON","重命名选中成绩",105,380,443,160,34,0,instance);

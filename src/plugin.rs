@@ -213,7 +213,7 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
         let new_scores = parse_scores(&catalog, &capture);
         if new_scores.is_empty() { log(&format!("{}P: 个人成绩缓存为空，未导出", if capture.style == 0 { "S" } else { "D" })); continue; }
         let player = capture.player.clone();
-        let entry = sessions.entry(player.clone()).or_insert_with(|| Collection { schema: 1, id: core::new_id(), name: core::server_name(&url), server_url: url.clone(), player_internal: player, iidx_id: None, nickname: None, captured_at: core::now(), catalog_sha256: catalog.sha256.clone(), parents: vec![], scores: vec![] });
+        let entry = sessions.entry(player.clone()).or_insert_with(|| Collection { schema: 1, id: core::new_id(), name: core::server_name(&url), server_url: url.clone(), player_internal: player, iidx_id: None, nickname: None, captured_at: core::now(), catalog_sha256: catalog.sha256.clone(), asphyxia_refid: None, parents: vec![], scores: vec![] });
         if let Some(profile) = profiles.get(&capture.player) { entry.iidx_id = Some(profile.iidx_id.clone()); entry.nickname = Some(profile.nickname.clone()); }
         entry.scores.retain(|s| s.chart as usize / 5 != capture.style);
         entry.scores.extend(new_scores);
@@ -228,7 +228,7 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let Some(path) = module_path(*INSTANCE.get().unwrap_or(&0)) else { return 0; };
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let _ = LOG_PATH.set(dir.join("AnyToFire.log"));
-    log("AnyToFire 0.1.0 启动");
+    log("AnyToFire 0.2.0 启动");
     let catalog_path = dir.join("data/info/0/music_data.bin");
     let catalog = match core::read_catalog(&catalog_path) { Ok(x) => x, Err(e) => { log(&format!("曲库读取失败: {e}")); return 0; } };
     if catalog.version != 34 { log("当前仅支持 IIDX 34 曲库；未安装钩子"); return 0; }

@@ -6,8 +6,8 @@
 
 1. 将 `dist/AnyToFire.dll` 与 `dist/AnyToFire.exe` 复制到 IIDX 根目录（与 `bm2dx.dll` 同目录）。
 2. 在 Spice2x 的 DLL 注入列表中加入 `AnyToFire.dll`。若同时使用 `IIDXScore.dll`，请将 AnyToFire 排在 IIDXScore 后面。该链式模式导出的成绩也包含 IIDXScore 对个人成绩缓存的本地覆盖。
-3. 启动游戏并登录玩家，等待游戏进入曲选。DLL 会在 `AnyToFire_exports/<时间-进程号>/` 写入 `manifest.json`、`fervidex.json`、`konami_sp.csv`、`konami_dp.csv`。每次读到 SP/DP 成绩会更新同一份导出。
-4. 退出游戏后运行 `AnyToFire.exe`。列表支持多选；顶部按钮可另存 Fervidex JSON、KONAMI CSV，或合并选中成绩。合并保留所有子成绩，并新增一份合并成绩。下方输入新名称后点击“重命名选中成绩”。
+3. 启动游戏并登录玩家，等待游戏进入曲选。DLL 会在 `AnyToFire_exports/<时间-进程号>/` 写入 `manifest.json`、`fervidex.json`、`konami_sp.csv`、`konami_dp.csv`、`asphyxia.db`。每次读到 SP/DP 成绩会更新同一份导出。
+4. 退出游戏后运行 `AnyToFire.exe`。可通过“导入成绩”选择 Fervidex JSON、KONAMI SP/DP CSV 或 Asphyxia CORE `savedata.db`；导入只写入本工具的 `AnyToFire_exports`，不修改来源文件或 Asphyxia 服务端数据库。列表支持多选合并、重命名，以及分别另存三种格式。合并保留所有子成绩，并新增一份合并成绩。
 
 DLL 日志在游戏根目录的 `AnyToFire.log`。EXE 默认读取同目录的 `AnyToFire_exports`，也可用 `AnyToFire.exe --data <导出目录>` 指定位置。项目使用 Rust；在本机运行 `build.ps1` 会重新编译并复制 DLL/EXE 到 `dist`。
 
@@ -16,6 +16,8 @@ DLL 日志在游戏根目录的 `AnyToFire.log`。EXE 默认读取同目录的 `
 - 游戏的 `pc.get` 个人资料包含公开 IIDX ID（`xxxx-xxxx`）、昵称以及服务器内部 `pid`。插件用 `pid` 与 `music.getrank` 的玩家键精确关联，不按登录顺序猜测 1P/2P。
 - `music.getrank` 全量个人成绩缓存提供各谱面的最佳 EX、灯和 BP。自动导出的 `fervidex.json` 使用 Fervidex static-profile 的 `scores/<song_id>/<chart>/{clear_type,ex_score,miss_count}` 结构。[格式参考](https://github.com/zkrising/Tachi/blob/main/typescript/server/src/lib/score-import/import-types/ir/fervidex-static/parser.ts)。
 - KONAMI CSV 使用相同的列名、顺序和 UTF-8 BOM，SP 与 DP 分文件。登录时的全量缓存没有每首最佳成绩对应的 PGreat、Great、游玩次数和最后游玩时间；这些列留空，不伪造数值。因而 CSV 适合查看和保留成绩，不保证所有严格校验的第三方导入器接受。
+- Asphyxia DB 使用官方 IIDX 插件的 `score` 逐行 JSON 结构（`esArray`、`cArray`、`mArray` 等）。自动导出时无法取得 Asphyxia 卡片 `refid`，因此生成的 `asphyxia.db` 是可由本工具再导入的成绩档案，并非可直接覆盖服务器 `savedata.db` 的完整账户存档；缺失的 PGreat/Great、鬼谱及选项信息也无法还原。[Asphyxia 成绩模型](https://github.com/asphyxia-core/plugins/blob/main/iidx%40asphyxia/models/score.ts)。从现有 Asphyxia DB 导入的成绩会保留其 `refid` 供再次导出。
+- 导入需要 EXE 所在游戏根目录的 `data/info/0/music_data.bin`，用于确认曲目和谱面 ID。KONAMI CSV 文件名必须有 `SP` 或 `DP`（例如 `20260922-iidx-sp.csv`）。三种格式中无法映射到当前曲库的旧曲或谱面会跳过，并在导入结果里显示数量；原文件不会被修改。
 - 合并按曲目 ID 与谱面分别取最高 EX、最高灯和最低已知 BP。曲库哈希不同或已知 IIDX ID 冲突时拒绝合并，避免误合并不同谱面或玩家。
 
 当前 DLL 只识别本机已核对的 IIDX 34 `2026091600` 版 `bm2dx.dll`。ABI 校验不通过时只写日志，不安装钩子。尚未经过一次实际登录验证；首次使用后请检查 `AnyToFire.log` 中的 `pc.get` 与导出行数，再核对生成文件中的 IIDX ID、昵称和成绩数量。

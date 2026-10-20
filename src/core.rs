@@ -38,6 +38,7 @@ pub struct Collection {
     pub nickname: Option<String>,
     pub captured_at: String,
     pub catalog_sha256: String,
+    #[serde(default)] pub asphyxia_refid: Option<String>,
     #[serde(default)] pub parents: Vec<String>,
     pub scores: Vec<Score>,
 }
@@ -125,7 +126,7 @@ pub fn merge(items: &[Collection], name: String) -> Result<Collection, String> {
             }
         }
     } }
-    Ok(Collection { schema: 1, id: new_id(), name, server_url: "合并".into(), player_internal: String::new(), iidx_id: known_ids.into_iter().next().map(str::to_owned), nickname: items.iter().find_map(|x| x.nickname.clone()), captured_at: now(), catalog_sha256: hash.clone(), parents: items.iter().map(|x| x.id.clone()).collect(), scores: scores.into_values().collect() })
+    Ok(Collection { schema: 1, id: new_id(), name, server_url: "合并".into(), player_internal: String::new(), iidx_id: known_ids.into_iter().next().map(str::to_owned), nickname: items.iter().find_map(|x| x.nickname.clone()), captured_at: now(), catalog_sha256: hash.clone(), asphyxia_refid: None, parents: items.iter().map(|x| x.id.clone()).collect(), scores: scores.into_values().collect() })
 }
 
 pub fn fervidex_json(collection: &Collection) -> io::Result<Vec<u8>> {
@@ -175,6 +176,7 @@ pub fn write_collection(root: &Path, collection: &Collection) -> io::Result<Path
     atomic_write(&dir.join("fervidex.json"), &fervidex_json(collection)?)?;
     atomic_write(&dir.join("konami_sp.csv"), &konami_csv(collection, 0)?)?;
     atomic_write(&dir.join("konami_dp.csv"), &konami_csv(collection, 1)?)?;
+    atomic_write(&dir.join("asphyxia.db"), &crate::formats::asphyxia_db(collection)?)?;
     Ok(dir)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -192,7 +194,7 @@ pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
 #[cfg(test)] mod tests {
     use super::*;
     fn collection(id: &str, ex: u32, bp: Option<u32>, lamp: u8) -> Collection {
-        Collection { schema: 1, id: id.into(), name: id.into(), server_url: "".into(), player_internal: "1".into(), iidx_id: Some("1234-5678".into()), nickname: Some("DJ".into()), captured_at: now(), catalog_sha256: "same".into(), parents: vec![], scores: vec![Score { music: 1000, chart: 3, ex, bp, lamp, title: "Song".into(), genre: "Genre".into(), artist: "Artist".into(), level: 10, levels: [0,0,0,10,0,0,0,0,0,0], pgreat: None, great: None }] }
+        Collection { schema: 1, id: id.into(), name: id.into(), server_url: "".into(), player_internal: "1".into(), iidx_id: Some("1234-5678".into()), nickname: Some("DJ".into()), captured_at: now(), catalog_sha256: "same".into(), asphyxia_refid: None, parents: vec![], scores: vec![Score { music: 1000, chart: 3, ex, bp, lamp, title: "Song".into(), genre: "Genre".into(), artist: "Artist".into(), level: 10, levels: [0,0,0,10,0,0,0,0,0,0], pgreat: None, great: None }] }
     }
     #[test] fn merge_independent_bests() {
         let a = collection("a", 1500, Some(30), 5); let b = collection("b", 1400, Some(20), 6);
