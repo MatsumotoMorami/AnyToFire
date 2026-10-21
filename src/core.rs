@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -92,9 +93,28 @@ pub fn read_catalog(path: &Path) -> io::Result<Catalog> {
     Ok(Catalog { version, maximum, sha256, songs })
 }
 
+fn is_local_server(url: &str) -> bool {
+    let authority = url.split_once("://").map_or(url, |(_, rest)| rest)
+        .split(['/', '?', '#']).next().unwrap_or("")
+        .rsplit('@').next().unwrap_or("");
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    if host.eq_ignore_ascii_case("localhost") { return true; }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_private() || ip.is_loopback() || ip.is_link_local(),
+        Ok(IpAddr::V6(ip)) => ip.is_loopback() || ip.is_unique_local() || ip.is_unicast_link_local(),
+        Err(_) => false,
+    }
+}
+
 pub fn server_name(url: &str) -> String {
     let lower = url.to_ascii_lowercase();
-    if lower.contains("firenet") { "Firenet".into() }
+    if is_local_server(url) { "本地服务器".into() }
+    else if lower.contains("maomani") { "Maomani".into() }
+    else if lower.contains("firenet") { "Firenet".into() }
     else if lower.contains("bjmania") || lower.contains("bjm") { "BJM".into() }
     else if lower.contains("fervidex") { "Fervidex".into() }
     else if url.is_empty() { "未知服务器".into() }
@@ -181,7 +201,23 @@ pub fn write_collection(root: &Path, collection: &Collection) -> io::Result<Path
     Ok(dir)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp"); fs::write(&tmp, bytes)?; fs::rename(&tmp, path)?; Ok(())
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, bytes)?;
+    #[cfg(windows)] {
+        use std::os::windows::ffi::OsStrExt;
+        #[link(name = "kernel32")]
+        extern "system" { fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32; }
+        let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+        let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // Replace the old export atomically when editing a collection on Windows.
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0x1 | 0x8) } == 0 {
+            let error = io::Error::last_os_error();
+            let _ = fs::remove_file(&tmp);
+            return Err(error);
+        }
+    }
+    #[cfg(not(windows))] fs::rename(&tmp, path)?;
+    Ok(())
 }
 pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
     let mut all = Vec::new();
@@ -192,8 +228,33 @@ pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
     all.sort_by(|a,b| b.captured_at.cmp(&a.captured_at)); Ok(all)
 }
 
+pub fn archive_collection(root: &Path, id: &str) -> io::Result<PathBuf> {
+    use std::path::Component;
+    if !matches!(Path::new(id).components().collect::<Vec<_>>().as_slice(), [Component::Normal(_)]) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid collection ID"));
+    }
+    let source = root.join(id);
+    if !source.join("manifest.json").is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "collection not found"));
+    }
+    let deleted = root.join(".deleted");
+    fs::create_dir_all(&deleted)?;
+    let destination = deleted.join(format!("{id}-{}", new_id()));
+    fs::rename(source, &destination)?;
+    Ok(destination)
+}
+
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn server_name_recognizes_local_addresses_and_maomani() {
+        for url in ["http://localhost:8083/", "http://127.0.0.1:8083/", "http://192.168.1.12/core/", "http://10.1.2.3/", "http://172.16.0.1/", "http://[::1]:8083/", "http://[fd00::1]/"] {
+            assert_eq!(server_name(url), "本地服务器", "{url}");
+        }
+        assert_eq!(server_name("http://maomani.cn:573/"), "Maomani");
+        assert_eq!(server_name("https://example.com/core/maomani"), "Maomani");
+        assert_eq!(server_name("https://example.com/localhost"), "https://example.com/localhost");
+        assert_eq!(server_name("http://8.8.8.8/"), "http://8.8.8.8/");
+    }
     fn collection(id: &str, ex: u32, bp: Option<u32>, lamp: u8) -> Collection {
         Collection { schema: 1, id: id.into(), name: id.into(), server_url: "".into(), player_internal: "1".into(), iidx_id: Some("1234-5678".into()), nickname: Some("DJ".into()), captured_at: now(), catalog_sha256: "same".into(), asphyxia_refid: None, parents: vec![], scores: vec![Score { music: 1000, chart: 3, ex, bp, lamp, title: "Song".into(), genre: "Genre".into(), artist: "Artist".into(), level: 10, levels: [0,0,0,10,0,0,0,0,0,0], pgreat: None, great: None }] }
     }
@@ -230,6 +291,15 @@ pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
         let saved = load_collections(&root).unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].scores[0].ex, 1500);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test] fn deleted_collection_is_hidden_and_recoverable() {
+        let root = std::env::temp_dir().join(format!("anytofire-delete-test-{}", new_id()));
+        write_collection(&root, &collection("session", 1000, None, 4)).unwrap();
+        assert!(archive_collection(&root, "../session").is_err());
+        let archived = archive_collection(&root, "session").unwrap();
+        assert!(archived.join("manifest.json").is_file());
+        assert!(load_collections(&root).unwrap().is_empty());
         fs::remove_dir_all(root).unwrap();
     }
     #[test] fn installed_catalog_layout_when_available() {

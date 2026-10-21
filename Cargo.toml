@@ -1,6 +1,6 @@
 [package]
 name = "anytofire"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 
 [lib]
@@ -16,6 +16,12 @@ serde_json = "1"
 csv = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 sha2 = "0.10"
+wry = "0.57"
+winit = "0.30"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4", "serde"] }
+ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.release]
 lto = true

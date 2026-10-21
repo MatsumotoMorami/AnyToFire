@@ -1,20 +1,30 @@
 use crate::core::{self, Catalog, Collection, Score};
+use crate::{music_reg::AvsNodes, push, score};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use sha2::{Digest, Sha256};
 
 type Method = unsafe extern "system" fn(*mut c_void, *mut c_void) -> bool;
 static ORIGINAL_RANK: OnceLock<Method> = OnceLock::new();
 static ORIGINAL_PROFILE: OnceLock<Method> = OnceLock::new();
+static ORIGINAL_REG: OnceLock<Method> = OnceLock::new();
+static ORIGINAL_REG_RESPONSE: OnceLock<Method> = OnceLock::new();
+static AVS_NODES: OnceLock<AvsNodes> = OnceLock::new();
 static SENDER: OnceLock<mpsc::Sender<Event>> = OnceLock::new();
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static LOG_LOCK: Mutex<()> = Mutex::new(());
 static INSTANCE: OnceLock<usize> = OnceLock::new();
+static REG_RESPONSE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SCORE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static SCORE_STORE: OnceLock<Mutex<score::Store>> = OnceLock::new();
+static ORIGINAL_APPOINT: OnceLock<Method> = OnceLock::new();
+static OBSERVED_EX: OnceLock<Mutex<HashMap<(String,i32,i32),i32>>> = OnceLock::new();
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 const PAGE_READWRITE: u32 = 4;
@@ -28,8 +38,24 @@ const PROFILE_END: usize = 0xab5030;
 const PROFILE_SLOT: usize = 0x10536c8;
 const PROFILE_PREFIX_SHA256: &str = "50bc87a2d3abbc57962eef434ed68e717e4e7bf78e3407dd620a1693effdc62b";
 const PROFILE_TAIL_SHA256: &str = "0fdece9cd449d7838c4680de45998ad64d3cf2f8349e06be461de4761cb55263";
+const REG_RVA: usize = 0xac2a30;
+const REG_END: usize = 0xac4234;
+const REG_SLOT: usize = 0x10541a0;
+const REG_PREFIX_HASH: u64 = 0x3ab0a9489048097e;
+const REG_TAIL_HASH: u64 = 0x0488067a4d603138;
+const REG_RESPONSE_RVA: usize = 0xac1ae0;
+const REG_RESPONSE_END: usize = 0xac2a23;
+const REG_RESPONSE_SLOT: usize = REG_SLOT + 8;
+const REG_RESPONSE_PREFIX_SHA256: &str = "1decb80ee839a0b6089ac64a17d276caf8fddf2b56d63af91f22957a5758a928";
+const REG_RESPONSE_TAIL_SHA256: &str = "fc665fe04fac985424232e0907adb121fdf2632322d591313951aefdbeea1e6e";
+const APPOINT_RVA: usize = 0xabda50;
+const APPOINT_END: usize = 0xabead0;
+const APPOINT_SLOT: usize = 0x1054208;
+const APPOINT_PREFIX_HASH: u64 = 0xc9a66f5264ba7c6e;
+const APPOINT_TAIL_HASH: u64 = 0x14b9251013ef812d;
 const GAME_TIMESTAMP: u32 = 0x6aa23d57;
 const GAME_IMAGE_SIZE: u32 = 0xc5ff000;
+const TRUSTED_AC_CATALOG_SHA256: &str = "2a817e42e9d9f6485b81b67104656da9f350c7106af9be15ec21c1e6ea147455";
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -38,6 +64,7 @@ extern "system" {
     fn GetModuleHandleExW(flags: u32, name_or_address: *const u16, module: *mut *mut c_void) -> i32;
     fn GetCommandLineW() -> *const u16;
     fn ReadProcessMemory(process: *mut c_void, from: *const c_void, to: *mut c_void, len: usize, read: *mut usize) -> i32;
+    fn WriteProcessMemory(process: *mut c_void, to: *mut c_void, from: *const c_void, len: usize, written: *mut usize) -> i32;
     fn GetCurrentProcess() -> *mut c_void;
     fn VirtualProtect(address: *mut c_void, len: usize, protection: u32, old: *mut u32) -> i32;
     fn CreateThread(attrs: *mut c_void, stack: usize, start: unsafe extern "system" fn(*mut c_void) -> u32, arg: *mut c_void, flags: u32, id: *mut u32) -> *mut c_void;
@@ -49,7 +76,7 @@ extern "system" {
 
 #[derive(Clone)] struct Capture { player: String, style: usize, bytes: Vec<u8> }
 #[derive(Clone)] struct Profile { player: String, iidx_id: String, nickname: String }
-enum Event { Scores(Capture), Profile(Profile) }
+enum Event { Scores(Capture), Profile(Profile), Play { context: usize, tree: Value }, NativeAck { context: usize, music: u32, chart: u8 } }
 fn log(message: &str) {
     let Some(path) = LOG_PATH.get() else { return; };
     let _guard = LOG_LOCK.lock();
@@ -58,6 +85,10 @@ fn log(message: &str) {
 fn read(address: usize, data: &mut [u8]) -> bool {
     let mut count = 0usize;
     unsafe { ReadProcessMemory(GetCurrentProcess(), address as *const c_void, data.as_mut_ptr().cast(), data.len(), &mut count) != 0 && count == data.len() }
+}
+fn write(address: usize, data: &[u8]) -> bool {
+    let mut count=0usize;
+    unsafe { WriteProcessMemory(GetCurrentProcess(),address as *mut c_void,data.as_ptr().cast(),data.len(),&mut count)!=0 && count==data.len() }
 }
 fn read_u32(address: usize) -> Option<u32> { let mut x = [0u8; 4]; read(address, &mut x).then(|| u32::from_le_bytes(x)) }
 fn read_u64(address: usize) -> Option<u64> { let mut x = [0u8; 8]; read(address, &mut x).then(|| u64::from_le_bytes(x)) }
@@ -72,15 +103,48 @@ fn module_path(module: usize) -> Option<PathBuf> {
 fn command_line() -> String {
     unsafe { let p = GetCommandLineW(); if p.is_null() { return String::new(); } let mut n = 0; while n < 32768 && *p.add(n) != 0 { n += 1; } String::from_utf16_lossy(std::slice::from_raw_parts(p, n)) }
 }
+fn command_option(cmd: &str, option: &str) -> Option<String> {
+    let words: Vec<&str> = cmd.split('"').collect();
+    let mut tokens = Vec::new();
+    for (i, part) in words.iter().enumerate() {
+        if i % 2 == 1 { tokens.push((*part).to_owned()); }
+        else { tokens.extend(part.split_whitespace().map(str::to_owned)); }
+    }
+    tokens.windows(2).find(|pair| pair[0].eq_ignore_ascii_case(option)).map(|pair| pair[1].clone())
+}
+fn xml_attribute(tag: &str, name: &str) -> Option<String> {
+    let key = format!("{name}=\"");
+    let start = tag.find(&key)? + key.len();
+    let value = tag[start..].split('"').next()?;
+    Some(value.replace("&amp;", "&").replace("&quot;", "\""))
+}
+fn spice_url(xml: &str) -> Option<String> {
+    let start = xml.find("<game name=\"Beatmania IIDX\"")?;
+    let game = &xml[start..xml[start..].find("</game>")? + start];
+    let options = game.find("<options")?;
+    let options = &game[options..];
+    let options = &options[..options.find("</options>")?];
+    for item in options.split("<option ").skip(1) {
+        let tag = item.split('>').next()?;
+        if xml_attribute(tag, "name").as_deref() == Some("url") {
+            return xml_attribute(tag, "value").filter(|s| !s.is_empty());
+        }
+    }
+    None
+}
 fn server_url() -> String {
     let cmd = command_line();
-    let lower = cmd.to_ascii_lowercase();
-    if let Some(i) = lower.find("-url ") {
-        let value = cmd[i + 5..].trim_start();
-        if let Some(stripped) = value.strip_prefix('"') { return stripped.split('"').next().unwrap_or("").to_string(); }
-        return value.split_whitespace().next().unwrap_or("").to_string();
-    }
-    String::new()
+    if let Some(url) = command_option(&cmd, "-url") { return url; }
+    let config = command_option(&cmd, "-cfgpath").map(PathBuf::from).or_else(||
+        std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("spicetools.xml")));
+    config.and_then(|p| fs::read_to_string(p).ok()).and_then(|xml| spice_url(&xml)).unwrap_or_default()
+}
+fn is_firenet_url(url: &str) -> bool {
+    let authority = url.split_once("://").map_or(url, |(_, rest)| rest)
+        .split(['/', '?', '#']).next().unwrap_or("")
+        .rsplit('@').next().unwrap_or("");
+    let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
+    host == "firenet.iidx.pro" || host.ends_with(".firenet.iidx.pro")
 }
 fn validate(base: usize) -> bool {
     if read_u32(base + 0x3c).filter(|v| *v < 0x1000).is_none() { return false; }
@@ -93,6 +157,23 @@ fn is_score_hook(address: usize) -> bool {
     let mut module = std::ptr::null_mut();
     if unsafe { GetModuleHandleExW(6, address as *const u16, &mut module) } == 0 { return false; }
     module_path(module as usize).and_then(|p| p.file_name().map(|x| x.to_string_lossy().to_string())).is_some_and(|x| x.eq_ignore_ascii_case("IIDXScore.dll"))
+}
+fn is_known_reg_hook(address: usize) -> bool { is_score_hook(address) }
+fn wait_for_score_hooks(base:usize)->bool{
+    for _ in 0..500 {
+        let Some(rank)=read_u64(base+RANK_SLOT).map(|x|x as usize) else{return false};
+        let Some(reg)=read_u64(base+REG_SLOT).map(|x|x as usize) else{return false};
+        let Some(appoint)=read_u64(base+APPOINT_SLOT).map(|x|x as usize) else{return false};
+        let native=rank==base+RANK_RVA && reg==base+REG_RVA && appoint==base+APPOINT_RVA;
+        let score=is_score_hook(rank)&&is_score_hook(reg)&&is_score_hook(appoint);
+        if native||score{return true}
+        let partial=[rank!=base+RANK_RVA,reg!=base+REG_RVA,appoint!=base+APPOINT_RVA]
+            .into_iter().any(|changed|changed);
+        if !partial{return true}
+        if (rank!=base+RANK_RVA&&!is_score_hook(rank)) || (reg!=base+REG_RVA&&!is_score_hook(reg)) || (appoint!=base+APPOINT_RVA&&!is_score_hook(appoint)){return false}
+        unsafe{Sleep(20)};
+    }
+    false
 }
 fn validate_profile(base: usize) -> bool {
     if read_u64(base + PROFILE_SLOT) != Some((base + PROFILE_RVA) as u64) { return false; }
@@ -122,11 +203,95 @@ fn install(base: usize) -> bool {
         if replace_slot(base + PROFILE_SLOT, base + PROFILE_RVA, profile_hook as *const () as usize) { log("pc.get 资料钩子已安装"); }
         else { log("pc.get 资料钩子被占用；成绩仍会导出，但身份可能为空"); }
     } else { log("pc.get 资料 ABI 未匹配；成绩仍会导出，但身份可能为空"); }
+    let mut reg_installed=false;
+    if validate_reg(base) {
+        if let Some(previous) = read_u64(base + REG_SLOT).map(|x| x as usize) {
+            if (previous == base + REG_RVA || is_known_reg_hook(previous)) && ORIGINAL_REG.set(unsafe { std::mem::transmute(previous) }).is_ok() {
+                if replace_slot(base + REG_SLOT, previous, reg_hook as *const () as usize) { reg_installed=true; log("music.reg 完整请求钩子已安装"); }
+                else { log("music.reg 钩子安装失败；单局采集不可用"); }
+            } else { log("music.reg 槽位被未知插件占用；单局采集不可用"); }
+        }
+    } else { log("music.reg ABI 未匹配；单局采集不可用"); }
+    if SCORE_STORE.get().is_some() && !chained && reg_installed {
+        SCORE_ACTIVE.store(true,Ordering::Release);
+        if validate_appoint(base) {
+            let original:Method=unsafe{std::mem::transmute(base+APPOINT_RVA)};
+            let _=ORIGINAL_APPOINT.set(original);
+            if replace_slot(base+APPOINT_SLOT,base+APPOINT_RVA,appoint_hook as *const () as usize){log("IIDXScore 兼容分数柱钩子已安装");}
+            else{log("IIDXScore 兼容分数柱槽位被占用；本地存分和最佳分数仍可用");}
+        } else {log("IIDXScore 兼容分数柱 ABI 未匹配；本地存分和最佳分数仍可用");}
+        log("AnyToFire 已独占 IIDXScore 兼容存分钩子");
+    } else if chained { log("IIDXScore 已先安装完整钩子：AnyToFire 不重复存分"); }
+    else if SCORE_STORE.get().is_some(){log("本地存分钩子未能完整安装；本次启动未接管存分");}
+    if validate_reg_response(base) {
+        if let Some(previous) = read_u64(base + REG_RESPONSE_SLOT).map(|x| x as usize) {
+            if (previous == base + REG_RESPONSE_RVA || is_known_reg_hook(previous)) && ORIGINAL_REG_RESPONSE.set(unsafe { std::mem::transmute(previous) }).is_ok() {
+                if replace_slot(base + REG_RESPONSE_SLOT, previous, reg_response_hook as *const () as usize) { REG_RESPONSE_ACTIVE.store(true, Ordering::Release); log("music.reg 原生响应钩子已安装"); }
+                else { log("music.reg 原生响应钩子安装失败；无法确认原生上传"); }
+            } else { log("music.reg 原生响应槽位被占用；无法确认原生上传"); }
+        }
+    } else { log("music.reg 原生响应 ABI 未匹配；无法确认原生上传"); }
     true
+}
+fn validate_appoint(base:usize)->bool{
+    if read_u64(base+APPOINT_SLOT)!=Some((base+APPOINT_RVA) as u64){return false}
+    let mut prefix=[0u8;32];let mut tail=vec![0u8;APPOINT_END-APPOINT_RVA-32];
+    read(base+APPOINT_RVA,&mut prefix)&&fnv(&prefix)==APPOINT_PREFIX_HASH&&read(base+APPOINT_RVA+32,&mut tail)&&fnv(&tail)==APPOINT_TAIL_HASH
+}
+fn validate_reg(base: usize) -> bool {
+    let mut prefix = [0u8;32]; let mut tail = vec![0u8;REG_END-REG_RVA-32];
+    read(base+REG_RVA,&mut prefix) && fnv(&prefix)==REG_PREFIX_HASH &&
+        read(base+REG_RVA+32,&mut tail) && fnv(&tail)==REG_TAIL_HASH
+}
+fn validate_reg_response(base: usize) -> bool {
+    let mut prefix = [0u8; 32]; let mut tail = vec![0u8; REG_RESPONSE_END - REG_RESPONSE_RVA - 32];
+    read(base + REG_RESPONSE_RVA, &mut prefix) && sha(&prefix) == REG_RESPONSE_PREFIX_SHA256 &&
+        read(base + REG_RESPONSE_RVA + 32, &mut tail) && sha(&tail) == REG_RESPONSE_TAIL_SHA256
+}
+unsafe extern "system" fn reg_hook(ctx: *mut c_void, node: *mut c_void) -> bool {
+    if SCORE_ACTIVE.load(Ordering::Acquire) {
+        let _=std::panic::catch_unwind(||{
+            let Some(store)=SCORE_STORE.get() else{return};
+            let Some(req)=read_u64(ctx as usize+0x70).map(|x|x as usize) else{return};
+            if req==0{return}
+            let mut raw=vec![0u8;0xea0];if !read(req,&mut raw){return}
+            if let Ok(mut db)=store.lock(){
+                if let Some(a)=score::Attempt::from_raw(raw,db.config.music_limit){
+                    if let Err(e)=db.save(&a){log(&format!("IIDXScore 兼容单局保存失败: {e}"));}
+                }
+            }
+        });
+    }
+    let result = ORIGINAL_REG.get().map(|f| f(ctx,node)).unwrap_or(false);
+    if result {
+        let _ = std::panic::catch_unwind(|| {
+            let Some(avs) = AVS_NODES.get() else { return; };
+            match unsafe { avs.encode_call(node) } {
+                Ok(tree) => { if let Some(sender)=SENDER.get() { let _=sender.send(Event::Play { context: ctx as usize, tree }); } }
+                Err(e) => log(&format!("music.reg 未采集: {e}")),
+            }
+        });
+    }
+    result
+}
+unsafe extern "system" fn reg_response_hook(ctx: *mut c_void, node: *mut c_void) -> bool {
+    let result = ORIGINAL_REG_RESPONSE.get().map(|f| f(ctx, node)).unwrap_or(false);
+    if result {
+        let _ = std::panic::catch_unwind(|| {
+            let Some(avs) = AVS_NODES.get() else { return; };
+            match unsafe { avs.reg_ack(node) } {
+                Ok(Some((music, chart))) => { if let Some(sender) = SENDER.get() { let _ = sender.send(Event::NativeAck { context: ctx as usize, music, chart }); } }
+                Ok(None) => log("music.reg 原生响应缺少可验证的曲目/谱面；不标记已上传"),
+                Err(e) => log(&format!("music.reg 原生响应读取失败: {e}")),
+            }
+        });
+    }
+    result
 }
 unsafe extern "system" fn rank_hook(ctx: *mut c_void, node: *mut c_void) -> bool {
     let result = ORIGINAL_RANK.get().map(|f| f(ctx, node)).unwrap_or(false);
     if !result { return result; }
+    if SCORE_ACTIVE.load(Ordering::Acquire) {let _=std::panic::catch_unwind(||overlay_score(ctx));}
     let _ = std::panic::catch_unwind(|| {
         let mut req = [0u8; 8]; if !read(ctx as usize + 0x70, &mut req) { return; }
         let req = u64::from_le_bytes(req) as usize; if req == 0 { return; }
@@ -146,6 +311,63 @@ unsafe extern "system" fn rank_hook(ctx: *mut c_void, node: *mut c_void) -> bool
         if read(ptr, &mut bytes) { if let Some(sender) = SENDER.get() { let _ = sender.send(Event::Scores(Capture { player, style, bytes })); } }
     });
     result
+}
+fn score_player(raw:&[u8])->Option<String>{
+    let end=raw.get(..16)?.iter().position(|&b|b==0)?;
+    (end>0&&raw[..end].iter().all(u8::is_ascii_digit)).then(||String::from_utf8_lossy(&raw[..end]).into_owned())
+}
+fn overlay_score(ctx:*mut c_void){
+    let Some(store)=SCORE_STORE.get() else{return};
+    let Some(req)=read_u64(ctx as usize+0x70).map(|x|x as usize) else{return};if req==0{return}
+    let mut head=[0u8;0x30];if !read(req,&mut head){return}
+    let Some(player)=score_player(&head) else{return};
+    let style=i32::from_le_bytes(head[0x10..0x14].try_into().unwrap());if !(0..=1).contains(&style){return}
+    let cache=u64::from_le_bytes(head[0x20+style as usize*8..0x28+style as usize*8].try_into().unwrap()) as usize;
+    if cache==0{return}
+    let Ok(db)=store.lock() else{return};
+    let Ok(rows)=db.rows(&player) else{return};
+    let mut pending:HashMap<usize,[u8;0x30]>=HashMap::new();
+    for (music,chart,best) in rows {
+        if music<0||music as usize>=db.config.music_limit||chart/5!=style{continue}
+        let idx=chart as usize%5;let dest=cache+music as usize*0x30;
+        let mut row=if let Some(old)=pending.get(&dest){*old}else{let mut r=[0u8;0x30];if !read(dest,&mut r){continue}r};
+        let present=row[0x2d];let ex=i32::from_le_bytes(row[idx*4..idx*4+4].try_into().unwrap());
+        let bp=i32::from_le_bytes(row[0x14+idx*4..0x18+idx*4].try_into().unwrap());
+        let lamp=row[0x28+idx] as i32;
+        if present>1||lamp>7||!(-1..=300000).contains(&ex)||!(-1..=100000).contains(&bp){continue}
+        let remote=if present!=0{score::Best{ex,bp,lamp}}else{score::Best::default()};
+        if let Some(observed)=OBSERVED_EX.get(){if let Ok(mut map)=observed.lock(){map.insert((player.clone(),music,chart),remote.ex);}}
+        let _=db.observe(&player,music,chart,remote);
+        let merged=score::merge(remote,best);
+        row[idx*4..idx*4+4].copy_from_slice(&merged.ex.to_le_bytes());
+        row[0x14+idx*4..0x18+idx*4].copy_from_slice(&merged.bp.to_le_bytes());
+        row[0x28+idx]=merged.lamp as u8;row[0x2d]=1;
+        pending.insert(dest,row);
+    }
+    for (dest,row) in pending {if !write(dest,&row){log("IIDXScore 兼容分数缓存写入失败");}}
+}
+unsafe extern "system" fn appoint_hook(ctx:*mut c_void,node:*mut c_void)->bool{
+    let result=ORIGINAL_APPOINT.get().map(|f|f(ctx,node)).unwrap_or(false);
+    if result&&SCORE_ACTIVE.load(Ordering::Acquire){let _=std::panic::catch_unwind(||overlay_ghost(ctx));}
+    result
+}
+fn overlay_ghost(ctx:*mut c_void){
+    let Some(store)=SCORE_STORE.get() else{return};
+    let Some(req)=read_u64(ctx as usize+0x70).map(|x|x as usize) else{return};
+    let Some(response)=read_u64(ctx as usize+0x78).map(|x|x as usize) else{return};
+    if req==0||response==0{return}
+    let mut head=[0u8;0x120];if !read(req,&mut head){return}
+    let Some(player)=score_player(&head[0x110..]) else{return};
+    let music=i32::from_le_bytes(head[0..4].try_into().unwrap());
+    let chart=i32::from_le_bytes(head[4..8].try_into().unwrap());
+    let Ok(db)=store.lock() else{return};
+    if music<0||music as usize>=db.config.music_limit||!(0..=9).contains(&chart){return}
+    let Ok(Some((ex,curve,gauge)))=db.ghost(&player,music,chart) else{return};
+    if OBSERVED_EX.get().and_then(|m|m.lock().ok()).and_then(|m|m.get(&(player,music,chart)).copied()).is_some_and(|remote|remote>ex){return}
+    let mut current=[0u8;65];if !read(response+0x65,&mut current)||current[64]>1{return}
+    let remote:i32=current[..64].iter().map(|&x|x as i32).sum();if current[64]!=0&&remote>=ex{return}
+    if !write(response+0x65,&curve)||!write(response+0x3a8,&gauge){return}
+    let _=write(response+0xa5,&[1]);let _=write(response+0x6a8,&[1]);let _=write(response+0x6d8,&[0]);
 }
 static CATALOG_MAXIMUM: OnceLock<usize> = OnceLock::new();
 
@@ -172,11 +394,10 @@ unsafe extern "system" fn profile_hook(ctx: *mut c_void, node: *mut c_void) -> b
         if normalized.len() != 8 || !normalized.bytes().all(|b| b.is_ascii_digit()) { log("pc.get 已返回，但 idstr 格式未确认；身份未写入"); return; }
         let iidx_id = format!("{}-{}", &normalized[..4], &normalized[4..]);
         let nickname = cp932(raw_name);
-        // pc.get writes the server's numeric pid at +0x28. getrank uses that same pid
-        // as a decimal string in its first 16 bytes, so this is an exact join key.
+        // getrank identifies this player by the eight digits of idstr, not pc.get's pid.
         let pid = u32::from_le_bytes(bytes[0x28..0x2c].try_into().unwrap());
         if pid == 0 { log("pc.get 未返回有效 pid；身份未写入"); return; }
-        if let Some(sender) = SENDER.get() { let _ = sender.send(Event::Profile(Profile { player: pid.to_string(), iidx_id, nickname })); }
+        if let Some(sender) = SENDER.get() { let _ = sender.send(Event::Profile(Profile { player: normalized, iidx_id, nickname })); }
     });
     result
 }
@@ -199,12 +420,73 @@ fn parse_scores(catalog: &Catalog, capture: &Capture) -> Vec<Score> {
     }
     scores.sort_by_key(|s| (s.music, s.chart)); scores
 }
-fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, url: String) {
+fn reg_identity(tree: &Value) -> Option<(u32, u8)> {
+    let attrs = &tree["children"].as_array()?.first()?["attributes"];
+    let music = attrs["mid"].as_str()?.parse::<u32>().ok()?;
+    let chart = attrs["clid"].as_str()?.parse::<u8>().ok()?;
+    (chart < 10).then_some((music, chart))
+}
+fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, url: String, game_dir: PathBuf) {
     let mut sessions: HashMap<String, Collection> = HashMap::new();
     let mut profiles: HashMap<String, Profile> = HashMap::new();
-    for event in rx {
+    let mut recent_requests: HashMap<String, std::time::Instant> = HashMap::new();
+    let mut native_pending: HashMap<usize, (String, u32, u8, std::time::Instant)> = HashMap::new();
+    let native_firenet = is_firenet_url(&url);
+    let mut last_flush = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    loop {
+        let event = match rx.recv_timeout(std::time::Duration::from_secs(1)) { Ok(e)=>Some(e), Err(mpsc::RecvTimeoutError::Timeout)=>None, Err(_)=>break };
+        if last_flush.elapsed() >= std::time::Duration::from_secs(1) {
+            if let Ok(settings)=push::load_settings(&game_dir) {
+                let _=push::flush_once(&game_dir,&settings,log);
+            }
+            last_flush=std::time::Instant::now();
+        }
+        let Some(event)=event else { continue; };
+        if let Event::NativeAck { context, music, chart } = event {
+            if let Some((id, expected_music, expected_chart, _)) = native_pending.remove(&context) {
+                if native_firenet && (music, chart) == (expected_music, expected_chart) {
+                    match push::mark_native_uploaded(&game_dir, &id) {
+                        Ok(true) => log(&format!("单局 {id} 火网原生提交已确认，标记已上传")),
+                        Ok(false) => log(&format!("单局 {id} 已有上传标记")),
+                        Err(e) => log(&format!("单局 {id} 原生确认写入失败: {e}")),
+                    }
+                } else { log(&format!("单局 {id} 原生响应曲目或谱面不匹配；不标记已上传")); }
+            }
+            continue;
+        }
+        if let Event::Play { context, tree } = &event {
+            let digest=sha(&serde_json::to_vec(tree).unwrap_or_default());
+            // The game retries one reg request within seconds. A two-minute
+            // window can also hide a distinct short/restarted play with the
+            // same score, so only coalesce the immediate transport retries.
+            if recent_requests.get(&digest).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5)) { continue; }
+            recent_requests.retain(|_,at| at.elapsed() < std::time::Duration::from_secs(5));
+            let settings=push::load_settings(&game_dir).unwrap_or_default();
+            let official=catalog.sha256 == TRUSTED_AC_CATALOG_SHA256 && push::official_chart(tree,&catalog,&catalog);
+            let auto_upload=official && settings.auto_sync && !settings.access_code.is_empty();
+            let expect_native=official && native_firenet && REG_RESPONSE_ACTIVE.load(Ordering::Acquire);
+            let mut play=push::new_event(tree.clone(),&settings.access_code,official);
+            if expect_native {
+                play.next_attempt_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_millis().saturating_add(120_000) as u64;
+            }
+            match push::persist(&game_dir,&play) {
+                Ok(_) => {
+                    recent_requests.insert(digest,std::time::Instant::now());
+                    if expect_native {
+                        if let Some((music, chart)) = reg_identity(tree) {
+                            native_pending.retain(|_, (_, _, _, at)| at.elapsed() < std::time::Duration::from_secs(300));
+                            native_pending.insert(*context, (play.event_id.clone(), music, chart, std::time::Instant::now()));
+                        }
+                    }
+                    log(&format!("单局 {} 已保存；{}",play.event_id,if expect_native {"等待火网原生提交响应"} else if auto_upload {"AC 曲目，等待同步"} else if !official {"omni/删除/未知曲目，禁止上传"} else {"自动同步未开启，仅本地保存"}));
+                }
+                Err(e) => log(&format!("单局保存失败: {e}")),
+            }
+            continue;
+        }
         if let Event::Profile(profile) = event {
-            log(&format!("pc.get 资料: pid {}，IIDX ID {}，昵称 {}", profile.player, profile.iidx_id, profile.nickname));
+            log(&format!("pc.get 资料: 玩家键 {}，IIDX ID {}，昵称 {}", profile.player, profile.iidx_id, profile.nickname));
             profiles.insert(profile.player.clone(), profile.clone());
             if let Some(entry) = sessions.get_mut(&profile.player) { entry.iidx_id = Some(profile.iidx_id); entry.nickname = Some(profile.nickname); let _ = core::write_collection(&dir, entry); }
             continue;
@@ -228,18 +510,44 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let Some(path) = module_path(*INSTANCE.get().unwrap_or(&0)) else { return 0; };
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let _ = LOG_PATH.set(dir.join("AnyToFire.log"));
-    log("AnyToFire 0.2.0 启动");
+    log("AnyToFire 0.3.0 启动");
     let catalog_path = dir.join("data/info/0/music_data.bin");
     let catalog = match core::read_catalog(&catalog_path) { Ok(x) => x, Err(e) => { log(&format!("曲库读取失败: {e}")); return 0; } };
     if catalog.version != 34 { log("当前仅支持 IIDX 34 曲库；未安装钩子"); return 0; }
+    if catalog.sha256 != TRUSTED_AC_CATALOG_SHA256 { log("AC 曲库哈希与已核对基线不同；单局上传将被禁止"); }
     let _ = CATALOG_MAXIMUM.set(catalog.maximum);
     let url = server_url();
     log(&format!("EA URL: {}；曲库 {} 首", if url.is_empty() { "未知" } else { &url }, catalog.songs.len()));
+    let catalog_version=catalog.version;
     let exports = dir.join("AnyToFire_exports"); if let Err(e) = fs::create_dir_all(&exports) { log(&format!("输出目录创建失败: {e}")); return 0; }
     let (tx, rx) = mpsc::channel(); let _ = SENDER.set(tx);
-    std::thread::spawn(move || process_captures(rx, catalog, exports, url));
+    std::thread::spawn({let dir=dir.clone(); move || process_captures(rx, catalog, exports, url, dir)});
     let name = wstr("bm2dx.dll"); let mut base = 0usize;
     for _ in 0..600 { base = GetModuleHandleW(name.as_ptr()) as usize; if base != 0 { break; } Sleep(100); }
+    if base==0 || !validate(base){log("未识别的 bm2dx.dll；不打开 IIDXScore 数据库或安装钩子");return 0;}
+    let atf_score_enabled=push::load_settings(&dir).unwrap_or_default().omni_overlay;
+    let old_score_enabled=score::legacy_enabled(&dir);
+    if atf_score_enabled || old_score_enabled {
+        if old_score_enabled && !atf_score_enabled {log("IIDXScore 已启用：AnyToFire 保留同格式存分能力，先获得钩子的一方负责存分");}
+        let configured=score::config(&dir).and_then(|config|{
+            if config.game_version!=catalog_version {return Err("IIDXScore 当前索引版本与游戏版本不同".into())}
+            Ok(config)
+        });
+        let config=match configured {Ok(x)=>Ok(x),Err(e)=>{log(&format!("IIDXScore 配置未就绪，尝试当前 AC 曲库默认作用域: {e}"));score::fallback_config(&dir)}};
+        match config.and_then(score::Store::open) {
+            Ok(store)=>{log(&format!("IIDXScore 兼容数据库: {}；作用域 {}",store.config.database.display(),store.config.scope));let _=SCORE_STORE.set(Mutex::new(store));let _=OBSERVED_EX.set(Mutex::new(HashMap::new()));}
+            Err(e)=>log(&format!("IIDXScore 兼容功能未启用: {e}")),
+        }
+    } else {log("AnyToFire 与 IIDXScore 的本地存分均未启用");}
+    let avs_module = GetModuleHandleW(wstr("avs2-core.dll").as_ptr());
+    if !avs_module.is_null() {
+        if let Some(api)=AvsNodes::resolve(avs_module) { let _=AVS_NODES.set(api); }
+    }
+    if AVS_NODES.get().is_none() { log("AVS2 node API 不可用；单局采集不可用"); }
+    if SCORE_STORE.get().is_none() && old_score_enabled {
+        log("AnyToFire 无法打开兼容库；保留原生槽位，等待 IIDXScore 自行接管");return 0;
+    }
+    if !wait_for_score_hooks(base){log("IIDXScore 钩子仍处于安装中或槽位不一致；AnyToFire 不抢占，避免重复或漏存分");return 0;}
     if base == 0 || !install(base) { log("未识别的 bm2dx.dll 或成绩钩子已被占用；未安装"); return 0; }
     let mut pinned = std::ptr::null_mut();
     let _ = GetModuleHandleExW(5, worker as *const () as *const u16, &mut pinned);
@@ -256,4 +564,37 @@ pub unsafe extern "system" fn DllMain(instance: *mut c_void, reason: u32, _: *mu
         if !thread.is_null() { CloseHandle(thread); }
     }
     1
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::{command_option, spice_url};
+
+    #[test]
+    fn resolves_iidx_url_from_spice_config() {
+        let xml = r#"<games><game name="Beatmania IIDX"><options><option name="url" value="http://server.bjmania.com:20573/core/?a=1&amp;b=2"/></options></game><game name="Other"><options><option name="url" value="wrong"/></options></game></games>"#;
+        assert_eq!(spice_url(xml).as_deref(), Some("http://server.bjmania.com:20573/core/?a=1&b=2"));
+    }
+
+    #[test]
+    fn parses_quoted_config_path() {
+        let cmd = r#""C:\IIDX\spice64.exe" -cfgpath "C:\Users\Some User\spicetools.xml" -url "https://example.com/core/""#;
+        assert_eq!(command_option(cmd, "-cfgpath").as_deref(), Some(r"C:\Users\Some User\spicetools.xml"));
+        assert_eq!(command_option(cmd, "-url").as_deref(), Some("https://example.com/core/"));
+    }
+}
+
+#[cfg(test)] mod tests {
+    use super::*;
+    #[test] fn only_firenet_hosts_enable_native_ack() {
+        assert!(is_firenet_url("https://services.firenet.iidx.pro/core/"));
+        assert!(is_firenet_url("https://firenet.iidx.pro/core/"));
+        assert!(!is_firenet_url("https://firenet.iidx.pro.evil.example/core/"));
+        assert!(!is_firenet_url("https://server.bjmania.com:20573/core/"));
+    }
+    #[test] fn native_ack_uses_music_and_chart_identity() {
+        let request = serde_json::json!({"children":[{"attributes":{"mid":"34000","clid":"3"}}]});
+        assert_eq!(reg_identity(&request), Some((34000, 3)));
+        assert_eq!(reg_identity(&serde_json::json!({"children":[{"attributes":{"mid":"34000","clid":"12"}}]})), None);
+    }
 }
