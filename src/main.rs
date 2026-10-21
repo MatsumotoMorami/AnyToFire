@@ -12,7 +12,8 @@ use rusqlite::Connection;
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::window::{Window, WindowId};
+use winit::platform::windows::WindowExtWindows;
+use winit::window::{Icon, Window, WindowId};
 use wry::{WebView, WebViewBuilder};
 
 type Hwnd = *mut c_void;
@@ -458,10 +459,13 @@ impl ApplicationHandler<Event> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         trace("resumed");
         if self.window.is_some() { return; }
+        let window_icon = Icon::from_rgba(include_bytes!("../ui-demo/assets/firenet-48.rgba").to_vec(), 48, 48).ok();
         let attrs = Window::default_attributes().with_title("AnyToFire · 成绩库")
             .with_inner_size(winit::dpi::LogicalSize::new(1180, 760))
-            .with_min_inner_size(winit::dpi::LogicalSize::new(860, 560));
+            .with_min_inner_size(winit::dpi::LogicalSize::new(860, 560))
+            .with_window_icon(window_icon.clone());
         let window = match event_loop.create_window(attrs) { Ok(w) => w, Err(e) => { eprintln!("{e}"); event_loop.exit(); return; } };
+        window.set_taskbar_icon(window_icon);
         trace("window created");
         let icon = base64::engine::general_purpose::STANDARD.encode(include_bytes!("../ui-demo/assets/firenet-48.png"));
         let html = include_str!("app.html")
