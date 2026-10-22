@@ -35,7 +35,7 @@ if ($LASTEXITCODE) { throw 'EXE tests failed' }
 & $cargo build --release
 if ($LASTEXITCODE) { throw 'Build failed' }
 
-$dist = Join-Path $PSScriptRoot 'dist'
+$dist = Join-Path $PSScriptRoot 'dist\AnyToFire'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 Copy-Item -LiteralPath 'target\release\anytofire.dll' -Destination (Join-Path $dist 'AnyToFire.dll') -Force
 Copy-Item -LiteralPath 'target\release\AnyToFire.exe' -Destination (Join-Path $dist 'AnyToFire.exe') -Force
@@ -44,4 +44,9 @@ $loader = Get-ChildItem -Path 'target\release\build' -Filter 'WebView2Loader.dll
     Select-Object -First 1
 if (-not $loader) { throw 'WebView2Loader.dll not found in release build' }
 Copy-Item -LiteralPath $loader.FullName -Destination (Join-Path $dist 'WebView2Loader.dll') -Force
+$version = [regex]::Match((Get-Content -LiteralPath 'Cargo.toml' -Raw), '(?m)^version\s*=\s*"([^"]+)"').Groups[1].Value
+if (-not $version) { throw 'Could not determine package version' }
+$archive = Join-Path $PSScriptRoot "dist\AnyToFire-v$version.zip"
+Compress-Archive -Path $dist -DestinationPath $archive -Force
 Write-Host "Built $dist\AnyToFire.dll, $dist\AnyToFire.exe and $dist\WebView2Loader.dll"
+Write-Host "Packaged $archive"

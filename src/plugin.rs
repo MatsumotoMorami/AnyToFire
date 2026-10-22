@@ -5,11 +5,12 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use sha2::{Digest, Sha256};
 use crate::builds::{Build, MethodSignature, BUILDS};
+use crate::layout;
 
 type Method = unsafe extern "system" fn(*mut c_void, *mut c_void) -> bool;
 static ORIGINAL_RANK: OnceLock<Method> = OnceLock::new();
@@ -488,7 +489,7 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
 }
 unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let Some(path) = module_path(*INSTANCE.get().unwrap_or(&0)) else { return 0; };
-    let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let dir = layout::game_dir_from_binary(&path);
     let _ = LOG_PATH.set(dir.join("AnyToFire.log"));
     log(&format!("AnyToFire {} 启动", env!("CARGO_PKG_VERSION")));
     let catalog_path = dir.join("data/info/0/music_data.bin");
@@ -535,7 +536,7 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     if base == 0 || !install(base) { log("未识别的 bm2dx.dll 或成绩钩子已被占用；未安装"); return 0; }
     let mut pinned = std::ptr::null_mut();
     let _ = GetModuleHandleExW(5, worker as *const () as *const u16, &mut pinned);
-    log("IIDX34 个人成绩缓存钩子已安装；登录后自动导出");
+    log(&format!("IIDX{} 个人成绩缓存钩子已安装；登录后自动导出", game_build.version));
     0
 }
 
