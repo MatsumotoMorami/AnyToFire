@@ -107,6 +107,34 @@ fn retry_after(response: &ureq::Response) -> Option<Duration> {
 pub struct UploadError { pub message: String, pub retry: bool, pub retry_after: Option<Duration> }
 fn permanent(message: impl Into<String>) -> UploadError { UploadError { message: message.into(), retry: false, retry_after: None } }
 fn temporary(message: impl Into<String>, retry_after: Option<Duration>) -> UploadError { UploadError { message: message.into(), retry: true, retry_after } }
+fn error_token(value: &Value) -> Option<&str> {
+    value.as_str().filter(|text| !text.is_empty() && text.len() <= 96
+        && text.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"_-.[]".contains(&byte)))
+}
+fn api_error_message(status: u16, reply: Option<&Value>) -> String {
+    let mut message = format!("HTTP {status}");
+    let Some(reply) = reply else { return message; };
+    let code = reply.get("code").and_then(error_token);
+    if let Some(code) = code { message.push_str(&format!(" {code}")); }
+    if let Some(violations) = reply.get("violations").and_then(Value::as_array) {
+        let fields: Vec<String> = violations.iter().take(3).filter_map(|item| {
+            let field = item.get("field").and_then(error_token)?;
+            let code = item.get("code").and_then(error_token)?;
+            Some(format!("{field}:{code}"))
+        }).collect();
+        if !fields.is_empty() { message.push_str(&format!(" [{}]", fields.join(", "))); }
+    }
+    if let Some(id) = reply.get("requestId").and_then(error_token) { message.push_str(&format!(" requestId={id}")); }
+    if status == 404 && code == Some("ACCESS_CODE_INVALID") {
+        message.push_str("；火网第三方访问码无效或已撤销，请在设置中更新");
+    } else if status == 410 && code == Some("ACCESS_CODE_EXPIRED") {
+        message.push_str("；火网第三方访问码已过期，请在设置中更新");
+    } else if status == 400 && reply.get("violations").and_then(Value::as_array)
+        .is_some_and(|items| items.iter().any(|item| item.get("code").and_then(Value::as_str) == Some("CONFLICTING_PLAY_LOG"))) {
+        message.push_str("；原始游玩日志与顶层成绩字段不一致，需火网服务端兼容");
+    }
+    message
+}
 pub fn submit(event: &PlayEvent, code: &str) -> Result<u16, UploadError> {
     if code.is_empty() || recipient_key(code) != event.recipient_key { return Err(permanent("接收账号与事件绑定不一致")); }
     let body = serde_json::to_vec(&Submission { schema_version: event.schema_version,
@@ -130,8 +158,10 @@ pub fn submit(event: &PlayEvent, code: &str) -> Result<u16, UploadError> {
         }
         Err(ureq::Error::Status(status, response)) => {
             let wait = retry_after(&response);
-            if status == 429 || status >= 500 { Err(temporary(format!("HTTP {status}"),wait)) }
-            else { Err(permanent(format!("HTTP {status}"))) }
+            let reply: Option<Value> = response.into_json().ok();
+            let message = api_error_message(status, reply.as_ref());
+            if status == 429 || status >= 500 { Err(temporary(message, wait)) }
+            else { Err(permanent(message)) }
         }
         Err(error) => Err(temporary(format!("网络错误: {error}"),None)),
     }
@@ -209,7 +239,12 @@ pub fn manual_upload(dir: &Path, ids: &[String], confirm_duplicate: bool, settin
         event.recipient_key = key.clone();
         // Persist account binding before network I/O so retries cannot switch recipients.
         core::atomic_write(&path, &serde_json::to_vec(&event).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        submit(&event, &settings.access_code).map_err(|e| format!("已上传 {count} 项；单局 {} 失败：{}", event.event_id, e.message))?;
+        if let Err(error) = submit(&event, &settings.access_code) {
+            event.attempts = event.attempts.saturating_add(1);
+            if !error.retry { event.blocked_reason = Some(error.message.clone()); }
+            core::atomic_write(&path, &serde_json::to_vec(&event).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+            return Err(format!("已上传 {count} 项；单局 {} 失败：{}", event.event_id, error.message));
+        }
         mark_uploaded(&mut event);
         event.blocked_reason = None;
         event.next_attempt_ms = 0;
@@ -242,6 +277,15 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
             .or_else(|| omni.as_ref().and_then(|catalog| catalog.songs.get(&id))))
             .map(|song| song.title.trim()).filter(|title| !title.is_empty())
             .map(str::to_owned).unwrap_or_else(|| format!("未知曲目 (ID: {})", if music_id.is_empty() { "?" } else { music_id }));
+        let blocked = if event.blocked_reason.as_deref() == Some("HTTP 400")
+            && attrs.is_some_and(|attrs| attrs["mnum"] == "-1")
+            && music.and_then(|module| module["children"].as_array()).is_some_and(|children| {
+                children.iter().find(|child| child["name"] == "music_play_log")
+                    .is_some_and(|log| log["children"].as_array().is_some_and(|nodes| nodes.iter()
+                        .any(|node| node["name"] == "is_sudden_death" && node["value"] == true)))
+            }) {
+            Some("HTTP 400：中途死亡原始包顶层 mnum=-1，游玩日志含实际失误数；火网服务端校验拒绝".to_owned())
+        } else { event.blocked_reason.clone() };
         rows.push(serde_json::json!({"eventId":event.event_id,"occurredAt":event.occurred_at,
             "musicId":music_id,"title":title,
             "exScore":attrs.and_then(|v| {
@@ -252,13 +296,38 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
             "module":music.and_then(|v| v["name"].as_str()).unwrap_or(""),
             "uploadAllowed":event.upload_allowed,"uploadedAt":event.uploaded_at,
             "uploadCount":if event.uploaded_at.is_some() { event.upload_count.max(1) } else { 0 },
-            "blocked":event.blocked_reason}));
+            "blocked":blocked}));
     }
     Ok(rows)
 }
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn api_errors_keep_validation_codes_without_echoing_server_details() {
+        let reply = serde_json::json!({"code":"VALIDATION_FAILED","detail":"secret must not appear",
+            "violations":[{"field":"request","code":"CONFLICTING_PLAY_LOG","params":{"raw":"secret"}}],
+            "requestId":"00000000-0000-0000-0000-000000000001"});
+        let message = api_error_message(400, Some(&reply));
+        assert!(message.contains("request:CONFLICTING_PLAY_LOG"));
+        assert!(message.contains("requestId="));
+        assert!(!message.contains("secret"));
+        let invalid = serde_json::json!({"code":"ACCESS_CODE_INVALID"});
+        assert!(api_error_message(404, Some(&invalid)).contains("访问码无效"));
+        assert_eq!(api_error_message(404, None), "HTTP 404");
+    }
+    #[test]
+    fn old_sudden_death_400_shows_actionable_reason() {
+        let dir = std::env::temp_dir().join(format!("anytofire-death-test-{}", uuid::Uuid::new_v4()));
+        let request = serde_json::json!({"children":[{"name":"IIDX34music","attributes":{"mid":"42","mnum":"-1"},
+            "children":[{"name":"music_play_log","children":[{"name":"is_sudden_death","value":true}]}]}]});
+        let mut event = new_event(request, "secret", true);
+        event.blocked_reason = Some("HTTP 400".into());
+        persist(&dir, &event).unwrap();
+        let rows = recent_rows(&dir).unwrap();
+        assert!(rows[0]["blocked"].as_str().unwrap().contains("中途死亡"));
+        fs::remove_dir_all(dir).unwrap();
+    }
     #[test] fn event_omits_access_code_and_preserves_identity() {
         let event = new_event(serde_json::json!({"name":"call","attributes":{"srcid":"ORIGINAL"}}), "secret-code", true);
         let encoded = serde_json::to_string(&event).unwrap();

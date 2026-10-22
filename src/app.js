@@ -197,7 +197,7 @@ function versionName(module) { return module === 'IIDX33music' ? 'Sparkle Shower
 function syncBadge(item) {
   let kind, label, detail;
   if (item.uploadedAt) { kind = 'uploaded'; label = '已上传'; detail = `成功 ${Math.max(1, item.uploadCount || 0)} 次`; }
-  else if (!item.uploadAllowed || /HTTP 401|访问码.{0,8}拒绝/.test(item.blocked || '')) { kind = 'refused'; label = '拒绝'; detail = item.blocked || '曲目或谱面不在受支持的 AC 曲库（omni、删除曲等）'; }
+  else if (!item.uploadAllowed || /HTTP 401|ACCESS_CODE_INVALID|ACCESS_CODE_EXPIRED|访问码.{0,8}拒绝/.test(item.blocked || '')) { kind = 'refused'; label = '拒绝'; detail = item.blocked || '曲目或谱面不在受支持的 AC 曲库（omni、删除曲等）'; }
   else if (item.blocked) { kind = 'error'; label = '错误'; detail = item.blocked; }
   else { kind = 'pending'; label = '待上传'; detail = ''; }
   return `<span class="sync-badge ${kind}"${detail ? ` title="${escapeHtml(detail)}"` : ''}>${label}</span>`;
