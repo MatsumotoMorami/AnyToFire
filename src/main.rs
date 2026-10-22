@@ -208,7 +208,12 @@ fn prepare_score(game_dir: &Path) -> Result<bool, String> {
         valid_configured_omni = core::read_catalog(&path).is_ok_and(|catalog| catalog.version == game_version(game_dir).unwrap_or(0));
     }
     if !valid_configured_omni {
-        ini = set_score_ini_value(&ini, "OmniMusicDatabase", "AnyToFire_data/music_omni_34_0a.bin", true);
+        let default_omni = match game_version(game_dir)? {
+            33 => "AnyToFire_data/music_omni_33_final.bin",
+            34 => "AnyToFire_data/music_omni_34_0a.bin",
+            other => return Err(format!("不支持的游戏版本: {other}")),
+        };
+        ini = set_score_ini_value(&ini, "OmniMusicDatabase", default_omni, true);
     }
     if ini != original {
         if ini_path.exists() { fs::copy(&ini_path, game_dir.join("IIDXScore.ini.AnyToFire.bak")).map_err(|e| e.to_string())?; }
@@ -292,6 +297,17 @@ mod hook_tests {
         assert!(config.migrations.len() >= 4);
         assert_eq!(score_ini_value(&dir, "OmniMusicDatabase").as_deref(), Some("AnyToFire_data/music_omni_34_0a.bin"));
         assert_eq!(config.database, dir.join("scores/custom.sqlite3"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn preparation_uses_33_omni_for_33_catalog() {
+        let dir = std::env::temp_dir().join(format!("atf-init-33-{}", core::new_id()));
+        fs::create_dir_all(dir.join("data/info/0")).unwrap();
+        fs::write(dir.join("data/info/0/music_data.bin"), include_bytes!("../assets/music_ac_33.bin")).unwrap();
+        assert_eq!(game_version(&dir).unwrap(), 33);
+        prepare_score(&dir).unwrap();
+        assert_eq!(score_ini_value(&dir, "OmniMusicDatabase").as_deref(), Some("AnyToFire_data/music_omni_33_final.bin"));
+        assert_eq!(anytofire::score::config(&dir).unwrap().game_version, 33);
         fs::remove_dir_all(dir).unwrap();
     }
 }
@@ -386,7 +402,7 @@ impl App {
             "refresh" => { self.refresh()?; self.send_settings() },
             "init_prepare" => {
                 if load_source(self.game_dir())?.is_none() { return Err("请先选择 cfg 配置或 start.bat 启动".into()); }
-                if game_version(self.game_dir())? != 34 { return Err("已识别 Sparkle Shower；当前 AnyToFire.dll 只支持 ZINRAI，未修改 IIDXScore 或注入配置".into()); }
+                if !matches!(game_version(self.game_dir())?, 33 | 34) { return Err("当前游戏版本不受支持，未修改 IIDXScore 或注入配置".into()); }
                 let migration_needed = prepare_score(self.game_dir())?;
                 self.send(json!({"type":"init_prepared","migrationNeeded":migration_needed})); Ok(())
             }
@@ -395,7 +411,7 @@ impl App {
                 self.send(json!({"type":"init_migrated"})); Ok(())
             }
             "init_inject" => {
-                if game_version(self.game_dir())? != 34 { return Err("当前 AnyToFire.dll 只支持 IIDX 34；为避免停用旧插件，未改动注入配置".into()); }
+                if !matches!(game_version(self.game_dir())?, 33 | 34) { return Err("当前游戏版本不受支持，未改动注入配置".into()); }
                 set_plugin_hooks(self.game_dir(), true, true)?;
                 fs::write(initialization_marker(self.game_dir()), json!({"version":game_version(self.game_dir())?,"completedAt":core::now()}).to_string())
                     .map_err(|e| format!("保存初始化状态失败: {e}"))?;

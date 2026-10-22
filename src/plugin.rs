@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use sha2::{Digest, Sha256};
+use crate::builds::{Build, MethodSignature, BUILDS};
 
 type Method = unsafe extern "system" fn(*mut c_void, *mut c_void) -> bool;
 static ORIGINAL_RANK: OnceLock<Method> = OnceLock::new();
@@ -25,37 +26,16 @@ static SCORE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static SCORE_STORE: OnceLock<Mutex<score::Store>> = OnceLock::new();
 static ORIGINAL_APPOINT: OnceLock<Method> = OnceLock::new();
 static OBSERVED_EX: OnceLock<Mutex<HashMap<(String,i32,i32),i32>>> = OnceLock::new();
+static GAME_BUILD: OnceLock<&'static Build> = OnceLock::new();
 
 const DLL_PROCESS_ATTACH: u32 = 1;
 const PAGE_READWRITE: u32 = 4;
-const RANK_RVA: usize = 0xabf4a0;
-const RANK_END: usize = 0xac0080;
-const RANK_SLOT: usize = 0x10540e8;
-const RANK_PREFIX_HASH: u64 = 0x883334e56ba575de;
-const RANK_TAIL_HASH: u64 = 0x21048fdf5a9cf31d;
-const PROFILE_RVA: usize = 0xaaa1a0;
-const PROFILE_END: usize = 0xab5030;
-const PROFILE_SLOT: usize = 0x10536c8;
-const PROFILE_PREFIX_SHA256: &str = "50bc87a2d3abbc57962eef434ed68e717e4e7bf78e3407dd620a1693effdc62b";
-const PROFILE_TAIL_SHA256: &str = "0fdece9cd449d7838c4680de45998ad64d3cf2f8349e06be461de4761cb55263";
-const REG_RVA: usize = 0xac2a30;
-const REG_END: usize = 0xac4234;
-const REG_SLOT: usize = 0x10541a0;
-const REG_PREFIX_HASH: u64 = 0x3ab0a9489048097e;
-const REG_TAIL_HASH: u64 = 0x0488067a4d603138;
-const REG_RESPONSE_RVA: usize = 0xac1ae0;
-const REG_RESPONSE_END: usize = 0xac2a23;
-const REG_RESPONSE_SLOT: usize = REG_SLOT + 8;
-const REG_RESPONSE_PREFIX_SHA256: &str = "1decb80ee839a0b6089ac64a17d276caf8fddf2b56d63af91f22957a5758a928";
-const REG_RESPONSE_TAIL_SHA256: &str = "fc665fe04fac985424232e0907adb121fdf2632322d591313951aefdbeea1e6e";
-const APPOINT_RVA: usize = 0xabda50;
-const APPOINT_END: usize = 0xabead0;
-const APPOINT_SLOT: usize = 0x1054208;
-const APPOINT_PREFIX_HASH: u64 = 0xc9a66f5264ba7c6e;
-const APPOINT_TAIL_HASH: u64 = 0x14b9251013ef812d;
-const GAME_TIMESTAMP: u32 = 0x6aa23d57;
-const GAME_IMAGE_SIZE: u32 = 0xc5ff000;
 const TRUSTED_AC_CATALOG_SHA256: &str = "2a817e42e9d9f6485b81b67104656da9f350c7106af9be15ec21c1e6ea147455";
+const TRUSTED_AC_33_SHA256: &str = "6b7bed978c2734276412f6b51c6624f75a004ddf8257826f622c8fe8415721fc";
+fn trusted_catalog(catalog: &Catalog) -> bool {
+    (catalog.version == 34 && catalog.sha256 == TRUSTED_AC_CATALOG_SHA256)
+        || (catalog.version == 33 && catalog.sha256 == TRUSTED_AC_33_SHA256)
+}
 
 #[link(name = "kernel32")]
 extern "system" {
@@ -92,7 +72,6 @@ fn write(address: usize, data: &[u8]) -> bool {
 }
 fn read_u32(address: usize) -> Option<u32> { let mut x = [0u8; 4]; read(address, &mut x).then(|| u32::from_le_bytes(x)) }
 fn read_u64(address: usize) -> Option<u64> { let mut x = [0u8; 8]; read(address, &mut x).then(|| u64::from_le_bytes(x)) }
-fn fnv(bytes: &[u8]) -> u64 { bytes.iter().fold(14695981039346656037u64, |h, b| (h ^ *b as u64).wrapping_mul(1099511628211)) }
 fn sha(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
 fn wstr(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
 fn module_path(module: usize) -> Option<PathBuf> {
@@ -146,13 +125,20 @@ fn is_firenet_url(url: &str) -> bool {
     let host = authority.split(':').next().unwrap_or("").to_ascii_lowercase();
     host == "firenet.iidx.pro" || host.ends_with(".firenet.iidx.pro")
 }
-fn validate(base: usize) -> bool {
-    if read_u32(base + 0x3c).filter(|v| *v < 0x1000).is_none() { return false; }
-    let pe = read_u32(base + 0x3c).unwrap() as usize;
-    if read_u32(base + pe) != Some(0x4550) || read_u32(base + pe + 8) != Some(GAME_TIMESTAMP) || read_u32(base + pe + 0x50) != Some(GAME_IMAGE_SIZE) { return false; }
-    let mut prefix = [0u8; 32]; let mut tail = vec![0u8; RANK_END - RANK_RVA - 32];
-    read(base + RANK_RVA, &mut prefix) && fnv(&prefix) == RANK_PREFIX_HASH && read(base + RANK_RVA + 32, &mut tail) && fnv(&tail) == RANK_TAIL_HASH
+fn signature_matches(base: usize, signature: &MethodSignature) -> bool {
+    let mut bytes = [0u8; 256];
+    read(base + signature.rva, &mut bytes) && sha(&bytes) == signature.sha256
 }
+fn detect_build(base: usize, version: u32) -> Option<&'static Build> {
+    if read_u32(base + 0x3c).filter(|v| *v < 0x1000).is_none() { return None; }
+    let pe = read_u32(base + 0x3c).unwrap() as usize;
+    if read_u32(base + pe) != Some(0x4550) { return None; }
+    BUILDS.iter().find(|build| build.version == version
+        && read_u32(base + pe + 8) == Some(build.timestamp)
+        && read_u32(base + pe + 0x50) == Some(build.image_size)
+        && signature_matches(base, &build.rank))
+}
+fn build() -> &'static Build { GAME_BUILD.get().copied().expect("validated game build") }
 fn is_score_hook(address: usize) -> bool {
     let mut module = std::ptr::null_mut();
     if unsafe { GetModuleHandleExW(6, address as *const u16, &mut module) } == 0 { return false; }
@@ -161,24 +147,23 @@ fn is_score_hook(address: usize) -> bool {
 fn is_known_reg_hook(address: usize) -> bool { is_score_hook(address) }
 fn wait_for_score_hooks(base:usize)->bool{
     for _ in 0..500 {
-        let Some(rank)=read_u64(base+RANK_SLOT).map(|x|x as usize) else{return false};
-        let Some(reg)=read_u64(base+REG_SLOT).map(|x|x as usize) else{return false};
-        let Some(appoint)=read_u64(base+APPOINT_SLOT).map(|x|x as usize) else{return false};
-        let native=rank==base+RANK_RVA && reg==base+REG_RVA && appoint==base+APPOINT_RVA;
+        let Some(rank)=read_u64(base+build().rank.slot).map(|x|x as usize) else{return false};
+        let Some(reg)=read_u64(base+build().reg.slot).map(|x|x as usize) else{return false};
+        let Some(appoint)=read_u64(base+build().appoint.slot).map(|x|x as usize) else{return false};
+        let native=rank==base+build().rank.rva && reg==base+build().reg.rva && appoint==base+build().appoint.rva;
         let score=is_score_hook(rank)&&is_score_hook(reg)&&is_score_hook(appoint);
         if native||score{return true}
-        let partial=[rank!=base+RANK_RVA,reg!=base+REG_RVA,appoint!=base+APPOINT_RVA]
+        let partial=[rank!=base+build().rank.rva,reg!=base+build().reg.rva,appoint!=base+build().appoint.rva]
             .into_iter().any(|changed|changed);
         if !partial{return true}
-        if (rank!=base+RANK_RVA&&!is_score_hook(rank)) || (reg!=base+REG_RVA&&!is_score_hook(reg)) || (appoint!=base+APPOINT_RVA&&!is_score_hook(appoint)){return false}
+        if (rank!=base+build().rank.rva&&!is_score_hook(rank)) || (reg!=base+build().reg.rva&&!is_score_hook(reg)) || (appoint!=base+build().appoint.rva&&!is_score_hook(appoint)){return false}
         unsafe{Sleep(20)};
     }
     false
 }
 fn validate_profile(base: usize) -> bool {
-    if read_u64(base + PROFILE_SLOT) != Some((base + PROFILE_RVA) as u64) { return false; }
-    let mut prefix = [0u8; 32]; let mut tail = vec![0u8; PROFILE_END - PROFILE_RVA - 32];
-    read(base + PROFILE_RVA, &mut prefix) && sha(&prefix) == PROFILE_PREFIX_SHA256 && read(base + PROFILE_RVA + 32, &mut tail) && sha(&tail) == PROFILE_TAIL_SHA256
+    let method = &build().profile;
+    read_u64(base + method.slot) == Some((base + method.rva) as u64) && signature_matches(base, method)
 }
 fn replace_slot(slot: usize, expected: usize, new: usize) -> bool {
     let slot = slot as *mut *mut c_void; let mut old = 0u32;
@@ -189,25 +174,25 @@ fn replace_slot(slot: usize, expected: usize, new: usize) -> bool {
     }
 }
 fn install(base: usize) -> bool {
-    if !validate(base) { return false; }
-    let Some(previous) = read_u64(base + RANK_SLOT).map(|x| x as usize) else { return false; };
-    let chained = previous != base + RANK_RVA;
+    if !signature_matches(base, &build().rank) { return false; }
+    let Some(previous) = read_u64(base + build().rank.slot).map(|x| x as usize) else { return false; };
+    let chained = previous != base + build().rank.rva;
     if chained && !is_score_hook(previous) { return false; }
     let original: Method = unsafe { std::mem::transmute(previous) };
     if ORIGINAL_RANK.set(original).is_err() { return false; }
-    if !replace_slot(base + RANK_SLOT, previous, rank_hook as *const () as usize) { return false; }
+    if !replace_slot(base + build().rank.slot, previous, rank_hook as *const () as usize) { return false; }
     if chained { log("检测到 IIDXScore 钩子：以链式方式安装。导出包含其本地成绩覆盖结果"); }
     if validate_profile(base) {
-        let original: Method = unsafe { std::mem::transmute(base + PROFILE_RVA) };
+        let original: Method = unsafe { std::mem::transmute(base + build().profile.rva) };
         let _ = ORIGINAL_PROFILE.set(original);
-        if replace_slot(base + PROFILE_SLOT, base + PROFILE_RVA, profile_hook as *const () as usize) { log("pc.get 资料钩子已安装"); }
+        if replace_slot(base + build().profile.slot, base + build().profile.rva, profile_hook as *const () as usize) { log("pc.get 资料钩子已安装"); }
         else { log("pc.get 资料钩子被占用；成绩仍会导出，但身份可能为空"); }
     } else { log("pc.get 资料 ABI 未匹配；成绩仍会导出，但身份可能为空"); }
     let mut reg_installed=false;
     if validate_reg(base) {
-        if let Some(previous) = read_u64(base + REG_SLOT).map(|x| x as usize) {
-            if (previous == base + REG_RVA || is_known_reg_hook(previous)) && ORIGINAL_REG.set(unsafe { std::mem::transmute(previous) }).is_ok() {
-                if replace_slot(base + REG_SLOT, previous, reg_hook as *const () as usize) { reg_installed=true; log("music.reg 完整请求钩子已安装"); }
+        if let Some(previous) = read_u64(base + build().reg.slot).map(|x| x as usize) {
+            if (previous == base + build().reg.rva || is_known_reg_hook(previous)) && ORIGINAL_REG.set(unsafe { std::mem::transmute(previous) }).is_ok() {
+                if replace_slot(base + build().reg.slot, previous, reg_hook as *const () as usize) { reg_installed=true; log("music.reg 完整请求钩子已安装"); }
                 else { log("music.reg 钩子安装失败；单局采集不可用"); }
             } else { log("music.reg 槽位被未知插件占用；单局采集不可用"); }
         }
@@ -215,18 +200,18 @@ fn install(base: usize) -> bool {
     if SCORE_STORE.get().is_some() && !chained && reg_installed {
         SCORE_ACTIVE.store(true,Ordering::Release);
         if validate_appoint(base) {
-            let original:Method=unsafe{std::mem::transmute(base+APPOINT_RVA)};
+            let original:Method=unsafe{std::mem::transmute(base+build().appoint.rva)};
             let _=ORIGINAL_APPOINT.set(original);
-            if replace_slot(base+APPOINT_SLOT,base+APPOINT_RVA,appoint_hook as *const () as usize){log("IIDXScore 兼容分数柱钩子已安装");}
+            if replace_slot(base+build().appoint.slot,base+build().appoint.rva,appoint_hook as *const () as usize){log("IIDXScore 兼容分数柱钩子已安装");}
             else{log("IIDXScore 兼容分数柱槽位被占用；本地存分和最佳分数仍可用");}
         } else {log("IIDXScore 兼容分数柱 ABI 未匹配；本地存分和最佳分数仍可用");}
         log("AnyToFire 已独占 IIDXScore 兼容存分钩子");
     } else if chained { log("IIDXScore 已先安装完整钩子：AnyToFire 不重复存分"); }
     else if SCORE_STORE.get().is_some(){log("本地存分钩子未能完整安装；本次启动未接管存分");}
     if validate_reg_response(base) {
-        if let Some(previous) = read_u64(base + REG_RESPONSE_SLOT).map(|x| x as usize) {
-            if (previous == base + REG_RESPONSE_RVA || is_known_reg_hook(previous)) && ORIGINAL_REG_RESPONSE.set(unsafe { std::mem::transmute(previous) }).is_ok() {
-                if replace_slot(base + REG_RESPONSE_SLOT, previous, reg_response_hook as *const () as usize) { REG_RESPONSE_ACTIVE.store(true, Ordering::Release); log("music.reg 原生响应钩子已安装"); }
+        if let Some(previous) = read_u64(base + build().reg_response.slot).map(|x| x as usize) {
+            if (previous == base + build().reg_response.rva || is_known_reg_hook(previous)) && ORIGINAL_REG_RESPONSE.set(unsafe { std::mem::transmute(previous) }).is_ok() {
+                if replace_slot(base + build().reg_response.slot, previous, reg_response_hook as *const () as usize) { REG_RESPONSE_ACTIVE.store(true, Ordering::Release); log("music.reg 原生响应钩子已安装"); }
                 else { log("music.reg 原生响应钩子安装失败；无法确认原生上传"); }
             } else { log("music.reg 原生响应槽位被占用；无法确认原生上传"); }
         }
@@ -234,19 +219,14 @@ fn install(base: usize) -> bool {
     true
 }
 fn validate_appoint(base:usize)->bool{
-    if read_u64(base+APPOINT_SLOT)!=Some((base+APPOINT_RVA) as u64){return false}
-    let mut prefix=[0u8;32];let mut tail=vec![0u8;APPOINT_END-APPOINT_RVA-32];
-    read(base+APPOINT_RVA,&mut prefix)&&fnv(&prefix)==APPOINT_PREFIX_HASH&&read(base+APPOINT_RVA+32,&mut tail)&&fnv(&tail)==APPOINT_TAIL_HASH
+    let method = &build().appoint;
+    read_u64(base + method.slot) == Some((base + method.rva) as u64) && signature_matches(base, method)
 }
 fn validate_reg(base: usize) -> bool {
-    let mut prefix = [0u8;32]; let mut tail = vec![0u8;REG_END-REG_RVA-32];
-    read(base+REG_RVA,&mut prefix) && fnv(&prefix)==REG_PREFIX_HASH &&
-        read(base+REG_RVA+32,&mut tail) && fnv(&tail)==REG_TAIL_HASH
+    signature_matches(base, &build().reg)
 }
 fn validate_reg_response(base: usize) -> bool {
-    let mut prefix = [0u8; 32]; let mut tail = vec![0u8; REG_RESPONSE_END - REG_RESPONSE_RVA - 32];
-    read(base + REG_RESPONSE_RVA, &mut prefix) && sha(&prefix) == REG_RESPONSE_PREFIX_SHA256 &&
-        read(base + REG_RESPONSE_RVA + 32, &mut tail) && sha(&tail) == REG_RESPONSE_TAIL_SHA256
+    signature_matches(base, &build().reg_response)
 }
 unsafe extern "system" fn reg_hook(ctx: *mut c_void, node: *mut c_void) -> bool {
     if SCORE_ACTIVE.load(Ordering::Acquire) {
@@ -462,7 +442,7 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
             if recent_requests.get(&digest).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5)) { continue; }
             recent_requests.retain(|_,at| at.elapsed() < std::time::Duration::from_secs(5));
             let settings=push::load_settings(&game_dir).unwrap_or_default();
-            let official=catalog.sha256 == TRUSTED_AC_CATALOG_SHA256 && push::official_chart(tree,&catalog,&catalog);
+            let official=trusted_catalog(&catalog) && push::official_chart(tree,&catalog,&catalog);
             let auto_upload=official && settings.auto_sync && !settings.access_code.is_empty();
             let expect_native=official && native_firenet && REG_RESPONSE_ACTIVE.load(Ordering::Acquire);
             let mut play=push::new_event(tree.clone(),&settings.access_code,official);
@@ -510,11 +490,11 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let Some(path) = module_path(*INSTANCE.get().unwrap_or(&0)) else { return 0; };
     let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     let _ = LOG_PATH.set(dir.join("AnyToFire.log"));
-    log("AnyToFire 0.3.0 启动");
+    log(&format!("AnyToFire {} 启动", env!("CARGO_PKG_VERSION")));
     let catalog_path = dir.join("data/info/0/music_data.bin");
     let catalog = match core::read_catalog(&catalog_path) { Ok(x) => x, Err(e) => { log(&format!("曲库读取失败: {e}")); return 0; } };
-    if catalog.version != 34 { log("当前仅支持 IIDX 34 曲库；未安装钩子"); return 0; }
-    if catalog.sha256 != TRUSTED_AC_CATALOG_SHA256 { log("AC 曲库哈希与已核对基线不同；单局上传将被禁止"); }
+    if !matches!(catalog.version, 33 | 34) { log("不支持的曲库版本；未安装钩子"); return 0; }
+    if !trusted_catalog(&catalog) { log("AC 曲库哈希与已核对基线不同；单局上传将被禁止"); }
     let _ = CATALOG_MAXIMUM.set(catalog.maximum);
     let url = server_url();
     log(&format!("EA URL: {}；曲库 {} 首", if url.is_empty() { "未知" } else { &url }, catalog.songs.len()));
@@ -524,7 +504,11 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     std::thread::spawn({let dir=dir.clone(); move || process_captures(rx, catalog, exports, url, dir)});
     let name = wstr("bm2dx.dll"); let mut base = 0usize;
     for _ in 0..600 { base = GetModuleHandleW(name.as_ptr()) as usize; if base != 0 { break; } Sleep(100); }
-    if base==0 || !validate(base){log("未识别的 bm2dx.dll；不打开 IIDXScore 数据库或安装钩子");return 0;}
+    let Some(game_build) = (base != 0).then(|| detect_build(base, catalog_version)).flatten() else {
+        log("未识别的 bm2dx.dll；不打开 IIDXScore 数据库或安装钩子"); return 0;
+    };
+    let _ = GAME_BUILD.set(game_build);
+    log(&format!("已识别 bm2dx.dll {} (IIDX {})", game_build.name, game_build.version));
     let atf_score_enabled=push::load_settings(&dir).unwrap_or_default().omni_overlay;
     let old_score_enabled=score::legacy_enabled(&dir);
     if atf_score_enabled || old_score_enabled {
