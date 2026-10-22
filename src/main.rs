@@ -41,9 +41,31 @@ extern "system" { fn MessageBoxW(hwnd: Hwnd, text: *const u16, title: *const u16
 
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
 const PLUGIN_DLL: &str = "AnyToFire.dll";
+fn is_spice_launch_line(line: &str) -> bool {
+    let line = line.trim_start().to_ascii_lowercase();
+    line.contains("spice64.exe") && !["rem ", "::", "echo ", "set ", "if ", "title "]
+        .iter().any(|prefix| line.starts_with(prefix))
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HookSource { Cfg, Bat }
+impl HookSource {
+    fn as_str(self) -> &'static str { if self == Self::Cfg { "cfg" } else { "bat" } }
+    fn parse(value: &str) -> Result<Self, String> {
+        match value { "cfg" => Ok(Self::Cfg), "bat" => Ok(Self::Bat), _ => Err("请选择 cfg 配置或 start.bat 启动".into()) }
+    }
+}
+fn source_path(game_dir: &Path) -> PathBuf { game_dir.join("AnyToFire_launch.json") }
+fn load_source(game_dir: &Path) -> Result<Option<HookSource>, String> {
+    let path = source_path(game_dir);
+    if !path.exists() { return Ok(None); }
+    let value: Value = serde_json::from_slice(&fs::read(&path).map_err(|e| e.to_string())?).map_err(|e| format!("启动方式配置损坏: {e}"))?;
+    Ok(Some(HookSource::parse(value["source"].as_str().unwrap_or(""))?))
+}
+fn save_source(game_dir: &Path, source: HookSource) -> Result<(), String> {
+    fs::write(source_path(game_dir), json!({"source":source.as_str()}).to_string()).map_err(|e| format!("保存启动方式失败: {e}"))
+}
 fn hook_line_range(line: &str) -> Option<(usize, usize)> {
-    let trimmed = line.trim_start();
-    if !trimmed.to_ascii_lowercase().starts_with("\".\\spice64.exe\"") { return None; }
+    if !is_spice_launch_line(line) { return None; }
     let marker = "-k \"";
     let begin = line.find(marker)? + marker.len();
     let end = begin + line[begin..].find('"')?;
@@ -61,6 +83,32 @@ fn xml_hook_range(xml: &str) -> Option<(usize, usize)> {
     let option_end = option_begin + game[option_begin..].find('"')?;
     Some((game_begin + option_begin, game_begin + option_end))
 }
+fn ensure_xml_hook(mut xml: String) -> Result<(String, (usize, usize)), String> {
+    if let Some(range) = xml_hook_range(&xml) { return Ok((xml, range)); }
+    let game_begin = xml.find("<game name=\"Beatmania IIDX\">").ok_or("spicetools.xml 中找不到 Beatmania IIDX 配置")?;
+    let game_end = game_begin + xml[game_begin..].find("</game>").ok_or("IIDX 的 cfg 配置不完整")?;
+    let options_end = game_begin + xml[game_begin..game_end].find("</options>").ok_or("IIDX 的 cfg 配置中找不到 options")?;
+    xml.insert_str(options_end, "    <option name=\"k\" value=\"\"/>\n        ");
+    let range = xml_hook_range(&xml).ok_or("无法添加 IIDX 的 k 配置")?;
+    Ok((xml, range))
+}
+fn batch_hook_range(batch: &str) -> Option<(usize, usize)> {
+    batch.split_inclusive('\n').scan(0usize, |offset, line| {
+        let current = *offset; *offset += line.len(); Some((current, line))
+    }).find_map(|(offset, line)| hook_line_range(line).map(|(begin,end)| (offset+begin,offset+end)))
+}
+fn ensure_batch_hook(mut batch: String) -> Result<(String, (usize, usize)), String> {
+    if let Some(range) = batch_hook_range(&batch) { return Ok((batch, range)); }
+    let start = batch.split_inclusive('\n').scan(0usize, |offset, line| {
+        let current = *offset; *offset += line.len(); Some((current,line))
+    }).find_map(|(offset,line)| is_spice_launch_line(line).then_some(offset))
+      .ok_or("start.bat 中找不到 spice64.exe 启动行")?;
+    let end = start + batch[start..].find('\n').unwrap_or(batch.len()-start);
+    let at = batch[start..end].find("%*").map(|x| start+x).unwrap_or_else(|| if end>start && batch.as_bytes()[end-1]==b'\r' { end-1 } else { end });
+    batch.insert_str(at, "-k \"\" ");
+    let range = batch_hook_range(&batch).ok_or("无法添加 start.bat 的 -k 参数")?;
+    Ok((batch, range))
+}
 fn update_hook_list(content: &str, range: (usize, usize), enabled: bool, remove_legacy: bool) -> String {
     let (begin, end) = range;
     let mut hooks: Vec<&str> = content[begin..end].split_whitespace()
@@ -69,39 +117,27 @@ fn update_hook_list(content: &str, range: (usize, usize), enabled: bool, remove_
     format!("{}{}{}", &content[..begin], hooks.join(" "), &content[end..])
 }
 fn plugin_enabled(game_dir: &Path) -> Result<bool, String> {
-    let _ = game_dir;
-    let path = spice_config_path()?;
-    let xml = fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}", path.display()))?;
-    let (begin, end) = xml_hook_range(&xml).ok_or("spicetools.xml 中找不到 Beatmania IIDX 的 k 配置")?;
-    let hooks = &xml[begin..end];
-    Ok(hooks.split_whitespace().any(|name| name.eq_ignore_ascii_case(PLUGIN_DLL)))
+    let source = match load_source(game_dir)? { Some(source) => source, None if !initialization_marker(game_dir).is_file() => return Ok(false), None => HookSource::Cfg };
+    let content = match source {
+        HookSource::Cfg => { let path=spice_config_path()?; fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}",path.display()))? },
+        HookSource::Bat => { let path=game_dir.join("start.bat"); fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}",path.display()))? },
+    };
+    let range = match source { HookSource::Cfg => xml_hook_range(&content), HookSource::Bat => batch_hook_range(&content) };
+    Ok(range.is_some_and(|(begin,end)| content[begin..end].split_whitespace().any(|name| name.eq_ignore_ascii_case(PLUGIN_DLL))))
 }
 fn set_plugin_enabled(game_dir: &Path, enabled: bool) -> Result<(), String> {
     set_plugin_hooks(game_dir, enabled, false)
 }
 fn set_plugin_hooks(game_dir: &Path, enabled: bool, remove_legacy: bool) -> Result<(), String> {
-    let xml_path = spice_config_path()?;
-    let xml = fs::read_to_string(&xml_path).map_err(|e| format!("无法读取 {}: {e}", xml_path.display()))?;
-    let xml_range = xml_hook_range(&xml).ok_or("spicetools.xml 中找不到 Beatmania IIDX 的 k 配置")?;
-    let updated_xml = update_hook_list(&xml, xml_range, enabled, remove_legacy);
-    let batch_path = game_dir.join("start.bat");
-    let batch = if batch_path.exists() { Some(fs::read_to_string(&batch_path).map_err(|e| format!("无法读取 {}: {e}", batch_path.display()))?) } else { None };
-    let batch_range = batch.as_ref().and_then(|batch| batch.split_inclusive('\n').scan(0usize, |offset, line| {
-        let current = *offset;
-        *offset += line.len();
-        Some((current, line))
-    }).find_map(|(offset, line)| hook_line_range(line).map(|(begin, end)| (offset + begin, offset + end))));
-    if batch.is_some() && batch_range.is_none() { return Err("start.bat 中找不到 spice64.exe 的 -k 列表".into()); }
-    let updated_batch = batch.as_ref().zip(batch_range).map(|(content, range)| update_hook_list(content, range, enabled, remove_legacy));
-    if updated_xml != xml {
-        fs::copy(&xml_path, xml_path.with_extension("xml.AnyToFire.bak")).map_err(|e| format!("备份 spicetools.xml 失败: {e}"))?;
-    }
-    if let (Some(content), Some(updated)) = (&batch, &updated_batch) {
-        if content != updated { fs::copy(&batch_path, game_dir.join("start.bat.AnyToFire.bak")).map_err(|e| format!("备份 start.bat 失败: {e}"))?; }
-    }
-    if updated_xml != xml { fs::write(&xml_path, updated_xml).map_err(|e| format!("更新 spicetools.xml 失败: {e}"))?; }
-    if let (Some(content), Some(updated)) = (&batch, &updated_batch) {
-        if content != updated { fs::write(&batch_path, updated).map_err(|e| format!("更新 start.bat 失败: {e}"))?; }
+    let source = match load_source(game_dir)? { Some(source)=>source, None if initialization_marker(game_dir).is_file()=>HookSource::Cfg, None=>return Err("请先选择启动配置来源".into()) };
+    let path = match source { HookSource::Cfg => spice_config_path()?, HookSource::Bat => game_dir.join("start.bat") };
+    let original = fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}",path.display()))?;
+    let (content, range) = match source { HookSource::Cfg => ensure_xml_hook(original.clone())?, HookSource::Bat => ensure_batch_hook(original.clone())? };
+    let updated = update_hook_list(&content, range, enabled, remove_legacy);
+    if updated != original {
+        let backup = match source { HookSource::Cfg => path.with_extension("xml.AnyToFire.bak"), HookSource::Bat => game_dir.join("start.bat.AnyToFire.bak") };
+        fs::copy(&path,backup).map_err(|e| format!("备份启动配置失败: {e}"))?;
+        fs::write(&path,updated).map_err(|e| format!("更新启动配置失败: {e}"))?;
     }
     Ok(())
 }
@@ -203,6 +239,21 @@ mod hook_tests {
         assert!(enabled.contains("value=\"Other.dll\""));
         let disabled = update_hook_list(&enabled, xml_hook_range(&enabled).unwrap(), false, false);
         assert_eq!(disabled, xml);
+    }
+    #[test]
+    fn missing_iidx_k_is_added_without_changing_other_game() {
+        let xml = "<games><game name=\"Beatmania IIDX\"><options><option name=\"url\" value=\"https://example/core/\"/></options></game><game name=\"Other\"><options><option name=\"k\" value=\"Other.dll\"/></options></game></games>";
+        let (xml, range) = ensure_xml_hook(xml.to_owned()).unwrap();
+        let updated = update_hook_list(&xml, range, true, false);
+        assert!(updated.contains("<option name=\"k\" value=\"AnyToFire.dll\"/>"));
+        assert!(updated.contains("value=\"Other.dll\""));
+    }
+    #[test]
+    fn missing_batch_k_is_added_to_launch_command() {
+        let batch = "@echo off\r\n\".\\spice64.exe\" -cfgpath \"config.xml\" %*\r\n";
+        let (batch, range) = ensure_batch_hook(batch.to_owned()).unwrap();
+        let updated = update_hook_list(&batch, range, true, false);
+        assert!(updated.contains("-cfgpath \"config.xml\" -k \"AnyToFire.dll\" %*"));
     }
     #[test]
     fn batch_hook_list_preserves_other_arguments() {
@@ -312,7 +363,10 @@ impl App {
     fn game_dir(&self) -> &Path { self.root.parent().unwrap_or(Path::new(".")) }
     fn send_settings(&self) -> Result<(), String> {
         let settings=push::load_settings(self.game_dir()).map_err(|e| e.to_string())?;
-        self.send(json!({"type":"settings","autoSync":settings.auto_sync,"hasAccessCode":!settings.access_code.is_empty(),"omniOverlay":settings.omni_overlay,"pluginEnabled":plugin_enabled(self.game_dir())?})); Ok(())
+        self.send(json!({"type":"settings","autoSync":settings.auto_sync,"hasAccessCode":!settings.access_code.is_empty(),"omniOverlay":settings.omni_overlay,"pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
+    }
+    fn send_hook_state(&self) -> Result<(), String> {
+        self.send(json!({"type":"hook_state","pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
     }
     fn item(&self, id: &str) -> Result<Collection, String> {
         self.items()?.into_iter().find(|x| x.id == id).ok_or_else(|| "找不到这份成绩".into())
@@ -331,6 +385,7 @@ impl App {
             },
             "refresh" => { self.refresh()?; self.send_settings() },
             "init_prepare" => {
+                if load_source(self.game_dir())?.is_none() { return Err("请先选择 cfg 配置或 start.bat 启动".into()); }
                 if game_version(self.game_dir())? != 34 { return Err("已识别 Sparkle Shower；当前 AnyToFire.dll 只支持 ZINRAI，未修改 IIDXScore 或注入配置".into()); }
                 let migration_needed = prepare_score(self.game_dir())?;
                 self.send(json!({"type":"init_prepared","migrationNeeded":migration_needed})); Ok(())
@@ -353,9 +408,28 @@ impl App {
                 if let Some(enabled)=request["autoSync"].as_bool() { settings.auto_sync=enabled; }
                 if let Some(enabled)=request["omniOverlay"].as_bool() { settings.omni_overlay=enabled; }
                 if settings.auto_sync && settings.access_code.is_empty() { return Err("请先填写火网第三方访问码".into()); }
-                if let Some(enabled)=request["pluginEnabled"].as_bool() { set_plugin_enabled(self.game_dir(),enabled)?; }
                 push::save_settings(self.game_dir(),&settings).map_err(|e| e.to_string())?;
                 self.send_settings()?; self.notify("设置已保存；分数显示开关在下次启动游戏时生效"); Ok(())
+            }
+            "set_hook_source" => {
+                let source=HookSource::parse(request["source"].as_str().unwrap_or(""))?;
+                let path=match source { HookSource::Cfg=>spice_config_path()?, HookSource::Bat=>self.game_dir().join("start.bat") };
+                let original=fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}",path.display()))?;
+                let content=match source { HookSource::Cfg=>ensure_xml_hook(original.clone())?.0, HookSource::Bat=>ensure_batch_hook(original.clone())?.0 };
+                if content != original {
+                    let backup=match source { HookSource::Cfg=>path.with_extension("xml.AnyToFire.bak"), HookSource::Bat=>self.game_dir().join("start.bat.AnyToFire.bak") };
+                    fs::copy(&path,backup).map_err(|e| format!("备份启动配置失败: {e}"))?;
+                    fs::write(&path,content).map_err(|e| format!("补建 -k 配置失败: {e}"))?;
+                }
+                save_source(self.game_dir(),source)?;
+                self.send_hook_state()?;
+                self.send(json!({"type":"hook_source_saved"})); Ok(())
+            }
+            "set_plugin_enabled" => {
+                let enabled=request["enabled"].as_bool().ok_or("缺少插件开关状态")?;
+                set_plugin_enabled(self.game_dir(),enabled)?;
+                self.send_hook_state()?;
+                self.notify(if enabled { "已启用插件，下次启动游戏时生效" } else { "已停用插件，下次启动游戏时生效" }); Ok(())
             }
             "logout" => {
                 let mut settings=push::load_settings(self.game_dir()).map_err(|e| e.to_string())?;

@@ -9,6 +9,8 @@ let initPendingVersion = null;
 let initializing = false;
 let initialSetup = false;
 let initAction = 'init_prepare';
+let initSourcePending = false;
+let lastHookSource = 'cfg';
 const initStep = id => {
   ['version','score','migrate','inject'].forEach(name => el('init-step-' + name).classList.toggle('active', name === id));
 };
@@ -19,6 +21,8 @@ function startInitialization(version) {
   el('init-backdrop').classList.add('open');
   el('init-version').textContent = version === 33 ? 'Sparkle Shower' : version === 34 ? 'ZINRAI' : '未知版本';
   el('init-version').className = 'init-version v' + version;
+  el('init-choice').hidden = true;
+  el('init-steps').hidden = false;
   el('init-step-version').classList.add('done');
   initStep('score');
   el('init-status').textContent = '正在准备本地分数数据库与旧曲库索引…';
@@ -106,15 +110,32 @@ window.anytofireReceive = message => {
     render();
   } else if (message.type === 'settings') {
     el('plugin-enabled').setAttribute('aria-checked', String(message.pluginEnabled));
+    lastHookSource = message.hookSource || 'cfg';
+    el('hook-source').value = lastHookSource;
+    el('init-hook-source').value = lastHookSource;
+    el('plugin-enabled').disabled = false;
     el('auto-sync').setAttribute('aria-checked', String(message.autoSync));
     el('omni-overlay').setAttribute('aria-checked', String(message.omniOverlay));
     el('access-code').value = '';
     el('access-code').placeholder = message.hasAccessCode ? '已填写' : '填写访问码';
     if (initialSetup && !initializing && message.hasAccessCode) { initialSetup = false; el('settings-backdrop').classList.remove('initial-setup'); }
     settingsReceived = true;
+  } else if (message.type === 'hook_state') {
+    el('plugin-enabled').setAttribute('aria-checked', String(message.pluginEnabled));
+    lastHookSource = message.hookSource || 'cfg';
+    el('hook-source').value = lastHookSource;
+    el('init-hook-source').value = lastHookSource;
+    el('plugin-enabled').disabled = false;
   } else if (message.type === 'initialization' && message.needed) {
     initPendingVersion = message.version;
     openGuide();
+  } else if (message.type === 'hook_source_saved') {
+    if (initSourcePending) {
+      initSourcePending = false;
+      const version = initPendingVersion;
+      initPendingVersion = null;
+      startInitialization(version);
+    }
   } else if (message.type === 'initialization' && !message.hasAccessCode) {
     showSettingsAfterGuide = true;
     initialSetup = true;
@@ -156,6 +177,7 @@ window.anytofireReceive = message => {
     el('init-retry').hidden = false;
   } else if (message.type === 'toast' || message.type === 'error') {
     if (message.type === 'error') el('refresh-recent').disabled = false;
+    if (message.type === 'error') { el('hook-source').value = lastHookSource; el('init-start').disabled = false; el('plugin-enabled').disabled = false; initSourcePending = false; }
     toast(message.message);
   }
 };
@@ -267,15 +289,17 @@ el('settings-close').addEventListener('click', closeSettings);
 el('settings-backdrop').addEventListener('click', event => { if (event.target === el('settings-backdrop')) closeSettings(); });
 el('init-retry').addEventListener('click', () => runInit(initAction));
 el('auto-sync').addEventListener('click', () => { const enabled = el('auto-sync').getAttribute('aria-checked') !== 'true'; el('auto-sync').setAttribute('aria-checked', String(enabled)); });
-el('plugin-enabled').addEventListener('click', () => { const enabled = el('plugin-enabled').getAttribute('aria-checked') !== 'true'; el('plugin-enabled').setAttribute('aria-checked', String(enabled)); });
+el('plugin-enabled').addEventListener('click', () => { const enabled = el('plugin-enabled').getAttribute('aria-checked') !== 'true'; el('plugin-enabled').disabled = true; call('set_plugin_enabled', {enabled}); });
+el('hook-source').addEventListener('change', () => call('set_hook_source', {source: el('hook-source').value}));
+el('init-start').addEventListener('click', () => { initSourcePending = true; el('init-start').disabled = true; call('set_hook_source', {source: el('init-hook-source').value}); });
 el('omni-overlay').addEventListener('click', () => { const enabled = el('omni-overlay').getAttribute('aria-checked') !== 'true'; el('omni-overlay').setAttribute('aria-checked', String(enabled)); });
-el('save-sync').addEventListener('click', () => call('set_sync', {pluginEnabled: el('plugin-enabled').getAttribute('aria-checked') === 'true', autoSync: el('auto-sync').getAttribute('aria-checked') === 'true', omniOverlay: el('omni-overlay').getAttribute('aria-checked') === 'true', accessCode: el('access-code').value}));
+el('save-sync').addEventListener('click', () => call('set_sync', {autoSync: el('auto-sync').getAttribute('aria-checked') === 'true', omniOverlay: el('omni-overlay').getAttribute('aria-checked') === 'true', accessCode: el('access-code').value}));
 el('logout').addEventListener('click', () => call('logout'));
 function openGuide() { el('guide-backdrop').classList.add('open'); el('guide-button').setAttribute('aria-expanded', 'true'); el('guide-close').focus(); }
 function closeGuide() {
   if (!el('guide-backdrop').classList.contains('open')) return;
   el('guide-backdrop').classList.remove('open'); el('guide-button').setAttribute('aria-expanded', 'false');
-  if (initPendingVersion !== null) { const version = initPendingVersion; initPendingVersion = null; startInitialization(version); }
+  if (initPendingVersion !== null) { el('init-backdrop').classList.add('open'); el('init-choice').hidden = false; el('init-steps').hidden = true; el('init-status').textContent = ''; }
   else if (showSettingsAfterGuide) { showSettingsAfterGuide = false; el('settings-backdrop').classList.add('open','initial-setup'); el('access-code').focus(); }
   else el('guide-button').focus();
 }
