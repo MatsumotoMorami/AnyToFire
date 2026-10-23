@@ -12,7 +12,8 @@ fn version(s: &str) -> Option<[u32;3]> {
 pub fn newer(remote: &str, current: &str) -> bool { matches!((version(remote),version(current)),(Some(a),Some(b)) if a>b) }
 fn fetch(url: &str, limit: u64) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://github.com/MatsumotoMorami/AnyToFire/releases/download/") && url!=API {return Err("更新地址不属于项目 Release".into())}
-    let response=ureq::AgentBuilder::new().timeout(Duration::from_secs(90)).build().get(url).set("User-Agent","AnyToFire-Updater").call().map_err(|e|e.to_string())?;
+    let tls=ureq::native_tls::TlsConnector::new().map_err(|e|format!("更新 TLS 初始化失败: {e}"))?;
+    let response=ureq::AgentBuilder::new().tls_connector(std::sync::Arc::new(tls)).timeout(Duration::from_secs(90)).build().get(url).set("User-Agent","AnyToFire-Updater").call().map_err(|e|e.to_string())?;
     let mut bytes=Vec::new(); response.into_reader().take(limit+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
     if bytes.len() as u64>limit {return Err("更新文件过大".into())} Ok(bytes)
 }
@@ -45,6 +46,14 @@ pub fn check_and_stage(binary: &Path) -> Result<Option<String>, String> {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    #[ignore = "reads public GitHub release metadata over HTTPS without staging/installing"]
+    fn github_metadata_https() {
+        let release:Release=serde_json::from_slice(&fetch(API,2_000_000).unwrap()).unwrap();
+        assert!(!release.draft && !release.prerelease);
+        assert!(version(&release.tag_name).is_some());
+        println!("PASS: native TLS GitHub HTTPS; latest {}",release.tag_name);
+    }
     #[test]
     #[ignore = "reads published release and verifies download only; never stages or installs"]
     fn published_release_detected_from_previous_version() {
