@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "anytofire"
-version = "0.3.5"
+version = "0.3.8"
 dependencies = [
  "base64",
  "chrono",

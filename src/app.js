@@ -1,5 +1,23 @@
 let items = [];
 let recentItems = [];
+let archiveSort = null;
+let recentSort = {key:'occurredAt', direction:-1};
+const sortText = new Intl.Collator('zh-CN', {numeric:true, sensitivity:'base'});
+function compareRows(a,b,sort) {
+  let av=a[sort.key], bv=b[sort.key];
+  if(sort.key==='occurredAt'){av=Date.parse(av);bv=Date.parse(bv);av=Number.isNaN(av)?null:av;bv=Number.isNaN(bv)?null:bv;}
+  if(av == null || bv == null) return av == null ? (bv == null ? 0 : 1) : -1;
+  const value=typeof av === 'number' && typeof bv === 'number' ? av-bv : sortText.compare(String(av),String(bv));
+  return value*sort.direction || sortText.compare(String(a.id || a.eventId),String(b.id || b.eventId));
+}
+function sortHeader(label,key,group,sort) {
+  const active=sort?.key===key;
+  return `<th aria-sort="${active ? (sort.direction===1?'ascending':'descending'):'none'}"><button class="table-sort" data-sort="${key}" data-sort-group="${group}">${label}<span aria-hidden="true">${active?(sort.direction===1?' ↑':' ↓'):' ↕'}</span></button></th>`;
+}
+function updateArchiveHeaders() {
+  const row=el('rows').closest('table').tHead.rows[0];
+  [['成绩来源','name'],['玩家','player'],['谱面','charts'],['类型','kind'],['导出时间','date']].forEach(([label,key],i)=>{row.cells[i+1].outerHTML=sortHeader(label,key,'archives',archiveSort);});
+}
 const selection = new Set();
 const recentSelection = new Set();
 let activeModal = null;
@@ -63,9 +81,10 @@ function filtered() {
   const source = el('source-filter').value;
   const order = el('sort').value;
   return items.filter(x => (source === 'all' || x.source === source) && (!query || [x.name,x.player,x.iidx,x.url].some(v => String(v).toLocaleLowerCase().includes(query))))
-    .sort((a,b) => order === 'charts' ? b.charts-a.charts : order === 'oldest' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
+    .sort((a,b) => archiveSort ? compareRows(a,b,archiveSort) : order === 'charts' ? b.charts-a.charts : order === 'oldest' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
 }
 function render() {
+  updateArchiveHeaders();
   const sources = [...new Set(items.map(x => x.source))].sort();
   const filter = el('source-filter');
   const current = filter.value;
@@ -116,6 +135,9 @@ window.anytofireReceive = message => {
     el('plugin-enabled').disabled = false;
     el('auto-sync').setAttribute('aria-checked', String(message.autoSync));
     el('omni-overlay').setAttribute('aria-checked', String(message.omniOverlay));
+    el('omni-local-only').setAttribute('aria-checked', String(message.omniLocalOnly !== false));
+    el('auto-merge').setAttribute('aria-checked', String(!!message.autoMerge));
+    el('auto-update').setAttribute('aria-checked', String(message.autoUpdate !== false));
     el('access-code').value = '';
     el('access-code').placeholder = message.hasAccessCode ? '已填写' : '填写访问码';
     if (initialSetup && !initializing && message.hasAccessCode) { initialSetup = false; el('settings-backdrop').classList.remove('initial-setup'); }
@@ -184,7 +206,7 @@ window.anytofireReceive = message => {
 function renderRecent() {
   const list = el('recent-list');
   list.classList.toggle('recent-empty', recentItems.length === 0);
-  list.innerHTML = recentItems.length ? `<table><thead><tr><th><input id="recent-select-all" type="checkbox" aria-label="选择所有可上传单局"></th><th>时间</th><th>游戏版本</th><th>曲目</th><th>EX Score</th><th>同步</th></tr></thead><tbody>${recentItems.map(x => `<tr class="${x.uploadedAt ? 'recent-uploaded' : ''} ${recentSelection.has(x.eventId) ? 'selected' : ''}"><td><input class="recent-check" type="checkbox" data-id="${escapeHtml(x.eventId)}" aria-label="选择 ${escapeHtml(x.title)}" ${recentSelection.has(x.eventId) ? 'checked' : ''} ${!x.uploadAllowed ? 'disabled' : ''}></td><td>${escapeHtml(displayTime(x.occurredAt))}</td><td>${versionName(x.module)}</td><td class="recent-title" title="${escapeHtml(x.title)}">${escapeHtml(x.title)}</td><td>${x.exScore == null ? '—' : escapeHtml(x.exScore)}</td><td>${syncBadge(x)}</td></tr>`).join('')}</tbody></table>` : '暂无最近游玩分数';
+  list.innerHTML = recentItems.length ? `<table><thead><tr><th><input id="recent-select-all" type="checkbox" aria-label="选择所有可上传单局"></th>${sortHeader('时间','occurredAt','recent',recentSort)}${sortHeader('游戏版本','module','recent',recentSort)}${sortHeader('曲目','title','recent',recentSort)}${sortHeader('EX Score','exScore','recent',recentSort)}${sortHeader('同步','syncSort','recent',recentSort)}</tr></thead><tbody>${[...recentItems].map(x=>({...x,syncSort:x.uploadedAt?'已上传':!x.uploadAllowed?'拒绝':(/HTTP 401|ACCESS_CODE_INVALID|ACCESS_CODE_EXPIRED|访问码.{0,8}拒绝/.test(x.blocked || '')?'拒绝':x.blocked?'错误':'待上传')})).sort((a,b)=>compareRows(a,b,recentSort)).map(x => `<tr class="${x.uploadedAt ? 'recent-uploaded' : ''} ${recentSelection.has(x.eventId) ? 'selected' : ''}"><td><input class="recent-check" type="checkbox" data-id="${escapeHtml(x.eventId)}" aria-label="选择 ${escapeHtml(x.title)}" ${recentSelection.has(x.eventId) ? 'checked' : ''} ${!x.uploadAllowed ? 'disabled' : ''}></td><td>${escapeHtml(displayTime(x.occurredAt))}</td><td>${versionName(x.module)}</td><td class="recent-title" title="${escapeHtml(x.title)}">${escapeHtml(x.title)}</td><td>${x.exScore == null ? '—' : escapeHtml(x.exScore)}</td><td>${syncBadge(x)}</td></tr>`).join('')}</tbody></table>` : '暂无最近游玩分数';
   const all = recentItems.filter(x => x.uploadAllowed);
   if (all.length) el('recent-select-all').checked = all.every(x => recentSelection.has(x.eventId));
   el('upload-recent').disabled = recentSelection.size === 0;
@@ -269,6 +291,8 @@ el('rows').addEventListener('click', event => {
   if (deleteButton) deleteDialog(deleteButton.dataset.id);
 });
 el('select-all').addEventListener('change', event => { filtered().forEach(x => event.target.checked ? selection.add(x.id) : selection.delete(x.id)); render(); });
+el('sort').addEventListener('change',()=>{archiveSort=null;});
+document.addEventListener('click',event=>{const button=event.target.closest('[data-sort]');if(!button)return;const key=button.dataset.sort;if(button.dataset.sortGroup==='recent'){recentSort={key,direction:recentSort.key===key?-recentSort.direction:1};renderRecent();}else{archiveSort={key,direction:archiveSort?.key===key?-archiveSort.direction:1};render();}});
 ['search','source-filter','sort'].forEach(id => el(id).addEventListener(id === 'search' ? 'input' : 'change', render));
 el('hero-merge').addEventListener('click', mergeDialog);
 function switchView(view) {
@@ -293,7 +317,9 @@ el('plugin-enabled').addEventListener('click', () => { const enabled = el('plugi
 el('hook-source').addEventListener('change', () => call('set_hook_source', {source: el('hook-source').value}));
 el('init-start').addEventListener('click', () => { initSourcePending = true; el('init-start').disabled = true; call('set_hook_source', {source: el('init-hook-source').value}); });
 el('omni-overlay').addEventListener('click', () => { const enabled = el('omni-overlay').getAttribute('aria-checked') !== 'true'; el('omni-overlay').setAttribute('aria-checked', String(enabled)); });
-el('save-sync').addEventListener('click', () => call('set_sync', {autoSync: el('auto-sync').getAttribute('aria-checked') === 'true', omniOverlay: el('omni-overlay').getAttribute('aria-checked') === 'true', accessCode: el('access-code').value}));
+el('omni-local-only').addEventListener('click', () => { const enabled = el('omni-local-only').getAttribute('aria-checked') !== 'true'; el('omni-local-only').setAttribute('aria-checked', String(enabled)); });
+el('save-sync').addEventListener('click', () => call('set_sync', {autoMerge: el('auto-merge').getAttribute('aria-checked') === 'true', autoUpdate: el('auto-update').getAttribute('aria-checked') === 'true', autoSync: el('auto-sync').getAttribute('aria-checked') === 'true', omniOverlay: el('omni-overlay').getAttribute('aria-checked') === 'true', omniLocalOnly: el('omni-local-only').getAttribute('aria-checked') === 'true', accessCode: el('access-code').value}));
+['auto-merge','auto-update'].forEach(id=>el(id).addEventListener('click',()=>el(id).setAttribute('aria-checked',String(el(id).getAttribute('aria-checked')!=='true'))));
 el('logout').addEventListener('click', () => call('logout'));
 function openGuide() { el('guide-backdrop').classList.add('open'); el('guide-button').setAttribute('aria-expanded', 'true'); el('guide-close').focus(); }
 function closeGuide() {

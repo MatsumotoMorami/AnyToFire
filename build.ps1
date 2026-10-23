@@ -50,3 +50,6 @@ $archive = Join-Path $PSScriptRoot "dist\AnyToFire-v$version.zip"
 Compress-Archive -Path $dist -DestinationPath $archive -Force
 Write-Host "Built $dist\AnyToFire.dll, $dist\AnyToFire.exe and $dist\WebView2Loader.dll"
 Write-Host "Packaged $archive"
+
+$hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+[IO.File]::WriteAllText($archive + '.sha256', $hash + '  ' + [IO.Path]::GetFileName($archive) + "`n", [Text.UTF8Encoding]::new($false))

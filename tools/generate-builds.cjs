@@ -1,5 +1,5 @@
 const fs=require('fs'), crypto=require('crypto');
-if(process.argv.length!==7)throw Error('Usage: node tools/generate-builds.cjs <0331.dll> <0422.dll> <0909.dll> <0916.dll> <0917.dll>');
+if(![7,8].includes(process.argv.length))throw Error('Usage: node tools/generate-builds.cjs <0331.dll> <0422.dll> <0909.dll> <0916.dll> <0917.dll> [1013.dll]');
 const fixtures=[
  ['0331',process.argv[2],33,[0x104b5a8,0x104abe8,0x104b660,0x104b668,0x104b6c8]],
  ['0422',process.argv[3],33,[0x10535f8,0x1052c38,0x10536b0,0x10536b8,0x1053718]],
@@ -7,6 +7,7 @@ const fixtures=[
  ['0916',process.argv[5],34,[0x10540e8,0x10536c8,0x10541a0,0x10541a8,0x1054208]],
  ['0917',process.argv[6],34,[0x10540e8,0x10536c8,0x10541a0,0x10541a8,0x1054208]],
 ];
+if(process.argv[7])fixtures.push(['1013',process.argv[7],34,[0x10530d8,0x10526b8,0x1053190,0x1053198,0x10531f8]]);
 let out=`// Generated from the five user-supplied bm2dx.dll files by tools/generate-builds.cjs.\n`;
 out+=`#[derive(Clone, Copy)]\npub struct MethodSignature { pub rva: usize, pub slot: usize, pub sha256: &'static str }\n`;
 out+=`pub struct Build { pub name: &'static str, pub version: u32, pub timestamp: u32, pub image_size: u32, pub rank: MethodSignature, pub profile: MethodSignature, pub reg: MethodSignature, pub reg_response: MethodSignature, pub appoint: MethodSignature }\n`;
@@ -19,6 +20,11 @@ for(const [name,path,version,slots] of fixtures){
  for(let i=0;i<5;i++){const slot=slots[i],rva=Number(b.readBigUInt64LE(off(slot))-base),sha=crypto.createHash('sha256').update(b.subarray(off(rva),off(rva)+256)).digest('hex');
  out+=`        ${['rank','profile','reg','reg_response','appoint'][i]}: MethodSignature { rva: 0x${rva.toString(16)}, slot: 0x${slot.toString(16)}, sha256: "${sha}" },\n`}
  out+=`    },\n`;
+}
+if(!process.argv[7]){
+ const existing=fs.readFileSync('src/builds.rs','utf8');
+ const entry=existing.match(/    Build \{ name: "1013",[\s\S]*?\n    \},\n/);
+ if(entry)out+=entry[0];
 }
 out+=`];\n`;
 if(process.env.VERIFY_BUILDS==='1'){

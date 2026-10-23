@@ -228,6 +228,65 @@ pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
     all.sort_by(|a,b| b.captured_at.cmp(&a.captured_at)); Ok(all)
 }
 
+/// Keep raw snapshots; update one deterministic aggregate per exact server,
+/// verified player and catalog. Never infer player identity from nickname.
+pub fn auto_merge_collections(root: &Path) -> io::Result<usize> {
+    #[cfg(windows)]
+    let _guard=MergeGuard::acquire(root)?;
+    let all=load_collections(root)?;
+    let mut groups: BTreeMap<(String,String,String),Vec<Collection>>=BTreeMap::new();
+    for item in all.iter().filter(|x|x.parents.is_empty() && !x.server_url.is_empty() && x.server_url!="合并") {
+        let Some(player)=item.iidx_id.as_deref().filter(|id|id.len()==9 && id.as_bytes()[4]==b'-' && id.bytes().enumerate().all(|(i,b)|i==4||b.is_ascii_digit())) else {continue};
+        groups.entry((item.server_url.trim_end_matches('/').to_owned(),player.to_owned(),item.catalog_sha256.clone())).or_default().push(item.clone());
+    }
+    let mut changed=0;
+    for ((server,player,hash),mut group) in groups {
+        if group.len()<2 {continue} group.sort_by(|a,b|a.id.cmp(&b.id));
+        let id=format!("auto-merge-{:x}",Sha256::digest(serde_json::to_vec(&(&server,&player,&hash))?));
+        let name=all.iter().find(|x|x.id==id).map(|x|x.name.clone()).unwrap_or_else(||format!("{} · {} · 自动合并",server_name(&server),group.iter().find_map(|x|x.nickname.as_deref()).unwrap_or(&player)));
+        let Ok(mut merged)=merge(&group,name) else {continue};
+        merged.id=id;merged.server_url=group[0].server_url.clone();merged.player_internal=group[0].player_internal.clone();
+        merged.captured_at=group.iter().map(|x|x.captured_at.clone()).max().unwrap_or_default();
+        if all.iter().any(|x|x.id==merged.id && x.parents==merged.parents && x.scores==merged.scores && x.nickname==merged.nickname && x.captured_at==merged.captured_at){continue}
+        write_collection(root,&merged)?;changed+=1;
+    }
+    Ok(changed)
+}
+
+#[cfg(windows)]
+struct MergeGuard(*mut std::ffi::c_void);
+#[cfg(windows)]
+impl MergeGuard {
+    fn acquire(root: &Path) -> io::Result<Self> {
+        #[link(name="kernel32")] extern "system" {
+            fn CreateMutexW(attr:*const std::ffi::c_void, owner:i32, name:*const u16)->*mut std::ffi::c_void;
+            fn WaitForSingleObject(handle:*mut std::ffi::c_void, timeout:u32)->u32;
+            fn CloseHandle(handle:*mut std::ffi::c_void)->i32;
+        }
+        let root=fs::canonicalize(root).unwrap_or_else(|_|root.to_path_buf());
+        let name=format!("Local\\AnyToFireMerge-{:x}",Sha256::digest(root.to_string_lossy().to_lowercase().as_bytes()));
+        let wide:Vec<u16>=name.encode_utf16().chain(Some(0)).collect();
+        let handle=unsafe{CreateMutexW(std::ptr::null(),0,wide.as_ptr())};
+        if handle.is_null(){return Err(io::Error::last_os_error())}
+        let result=unsafe{WaitForSingleObject(handle,30_000)};
+        if result!=0 && result!=128 {unsafe{CloseHandle(handle)};return Err(io::Error::new(io::ErrorKind::TimedOut,"档案合并锁超时"))}
+        Ok(Self(handle))
+    }
+}
+#[cfg(windows)]
+impl Drop for MergeGuard {
+    fn drop(&mut self) {
+        #[link(name="kernel32")] extern "system" {fn ReleaseMutex(handle:*mut std::ffi::c_void)->i32;fn CloseHandle(handle:*mut std::ffi::c_void)->i32;}
+        unsafe{ReleaseMutex(self.0);CloseHandle(self.0);}
+    }
+}
+
+pub fn write_export(root: &Path, game_dir: &Path, collection: &Collection) -> io::Result<PathBuf> {
+    let path=write_collection(root,collection)?;
+    if crate::push::load_settings(game_dir)?.auto_merge {auto_merge_collections(root)?;}
+    Ok(path)
+}
+
 pub fn archive_collection(root: &Path, id: &str) -> io::Result<PathBuf> {
     use std::path::Component;
     if !matches!(Path::new(id).components().collect::<Vec<_>>().as_slice(), [Component::Normal(_)]) {
@@ -261,6 +320,24 @@ pub fn archive_collection(root: &Path, id: &str) -> io::Result<PathBuf> {
     #[test] fn merge_independent_bests() {
         let a = collection("a", 1500, Some(30), 5); let b = collection("b", 1400, Some(20), 6);
         let m = merge(&[a,b], "合并".into()).unwrap(); assert_eq!(m.scores[0].ex,1500); assert_eq!(m.scores[0].bp,Some(20)); assert_eq!(m.scores[0].lamp,6); assert_eq!(m.parents.len(),2);
+    }
+    #[test] fn automatic_merge_is_scoped_idempotent_and_retains_originals() {
+        let root=std::env::temp_dir().join(format!("atf-automerge-{}",new_id()));
+        let mut a=collection("a",1500,Some(30),5);a.server_url="https://one.example/".into();
+        let mut b=a.clone();b.id="b".into();b.scores[0].lamp=6;b.scores[0].bp=Some(20);
+        let mut other=b.clone();other.id="other-server".into();other.server_url="https://two.example".into();
+        let mut player=b.clone();player.id="other-player".into();player.iidx_id=Some("9999-8888".into());
+        let mut catalog=b.clone();catalog.id="other-catalog".into();catalog.catalog_sha256="different".into();
+        let mut unknown=b.clone();unknown.id="unknown".into();unknown.iidx_id=None;
+        for c in [&a,&b,&other,&player,&catalog,&unknown] {write_collection(&root,c).unwrap();}
+        assert_eq!(auto_merge_collections(&root).unwrap(),1);
+        let all=load_collections(&root).unwrap();assert_eq!(all.len(),7);
+        let m=all.iter().find(|x|x.id.starts_with("auto-merge-")).unwrap();
+        assert_eq!(m.parents,vec!["a","b"]);assert_eq!(m.scores[0].ex,1500);assert_eq!(m.scores[0].lamp,6);assert_eq!(m.scores[0].bp,Some(20));
+        assert_eq!(auto_merge_collections(&root).unwrap(),0);
+        b.scores[0].ex=1700;write_collection(&root,&b).unwrap();assert_eq!(auto_merge_collections(&root).unwrap(),1);
+        assert_eq!(load_collections(&root).unwrap().len(),7);
+        fs::remove_dir_all(root).unwrap();
     }
     #[test] fn merge_rejects_unknown_identity() {
         let a = collection("a", 1500, Some(30), 5);

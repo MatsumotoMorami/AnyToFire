@@ -38,4 +38,11 @@ pub const BUILDS: &[Build] = &[
         reg_response: MethodSignature { rva: 0xac1b20, slot: 0x10541a8, sha256: "fc73479467b309954ed25d9de5acd222510f830125bfe654a556d803f48be623" },
         appoint: MethodSignature { rva: 0xabda90, slot: 0x1054208, sha256: "96691801e8007d303f6526e14cf9a2261b3778383cb527e8b30e0656cdf3ae0d" },
     },
+    Build { name: "1013", version: 34, timestamp: 0x6ac5f8ce, image_size: 0xc5fe000,
+        rank: MethodSignature { rva: 0xabf160, slot: 0x10530d8, sha256: "9428dfee82f55f246bdbc265a242422c36563a6b7baccfe718a11e0a61fed0d2" },
+        profile: MethodSignature { rva: 0xaa9e60, slot: 0x10526b8, sha256: "35df6b341d89eeac73d4eee3fbb30706b3dfffc99247ff1df258cc53ece81e05" },
+        reg: MethodSignature { rva: 0xac26f0, slot: 0x1053190, sha256: "d204ee63026e59a8a89ec1158d6b9c21197d7d5961f7a56673d1f303d3a2b765" },
+        reg_response: MethodSignature { rva: 0xac17a0, slot: 0x1053198, sha256: "d81758e7bf7637ced95a96deb425f7774d2c8a71f545e0d676db6a5ec7f67f0f" },
+        appoint: MethodSignature { rva: 0xabd710, slot: 0x10531f8, sha256: "5a794910b89df9bb0a7257ad3b58284ac9a687f47afbf7f82adff0c3d987ffdf" },
+    },
 ];

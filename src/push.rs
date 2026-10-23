@@ -17,10 +17,19 @@ pub struct SyncSettings {
     #[serde(default)] pub auto_sync: bool,
     #[serde(default)] pub access_code: String,
     #[serde(default = "default_true")] pub omni_overlay: bool,
+    #[serde(default = "default_true")] pub omni_local_only: bool,
+    #[serde(default)] pub auto_merge: bool,
+    #[serde(default = "default_true")] pub auto_update: bool,
 }
 fn default_true() -> bool { true }
 impl Default for SyncSettings {
-    fn default() -> Self { Self { auto_sync: false, access_code: String::new(), omni_overlay: true } }
+    fn default() -> Self { Self { auto_sync: false, access_code: String::new(), omni_overlay: true, omni_local_only: true, auto_merge: false, auto_update: true } }
+}
+
+// A missing/unverified catalog is not evidence that a chart is Omni.
+// The gate runs in the native request builder, before XRPC can send the packet.
+pub fn native_score_blocked(enabled: bool, official_chart: Option<bool>) -> bool {
+    enabled && official_chart == Some(false)
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -260,6 +269,7 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
     if events.is_empty() { return Ok(rows); }
     let catalog = core::read_catalog(&dir.join("data/info/0/music_data.bin")).ok();
     let omni = [
+        "data_mods/omnimix_34/info/0/music_omni.bin",
         "data_mods/ominimix/info/1/music_omni.bin",
         "data_mods/omnimix/info/1/music_omni.bin",
         "data/info/1/music_omni.bin",
@@ -302,6 +312,20 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
 }
 
 #[cfg(test)] mod tests {
+    #[test]
+    fn omni_local_only_defaults_on_for_existing_settings() {
+        let settings: super::SyncSettings = serde_json::from_str(r#"{"autoSync":true,"omniOverlay":false}"#).unwrap();
+        assert!(settings.omni_local_only);
+        let saved = serde_json::to_value(&settings).unwrap();
+        assert_eq!(saved["omniLocalOnly"], true);
+    }
+    #[test]
+    fn local_only_gate_blocks_confirmed_non_ac_but_not_ac_or_unknown() {
+        assert!(super::native_score_blocked(true, Some(false)));
+        assert!(!super::native_score_blocked(false, Some(false)));
+        assert!(!super::native_score_blocked(true, Some(true)));
+        assert!(!super::native_score_blocked(true, None));
+    }
     use super::*;
     #[test]
     fn api_errors_keep_validation_codes_without_echoing_server_details() {
@@ -352,7 +376,7 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
         persist(&dir, &event).unwrap();
         let rows = recent_rows(&dir).unwrap();
         assert_eq!(rows[0]["uploadedAt"], event.uploaded_at.unwrap());
-        let settings = SyncSettings { auto_sync: false, access_code: "secret".into(), omni_overlay: true };
+        let settings = SyncSettings { auto_sync: false, access_code: "secret".into(), ..SyncSettings::default() };
         let result = manual_upload(&dir, &[event.event_id], false, &settings);
         assert!(result.unwrap_err().contains("确认再次上传"));
         fs::remove_dir_all(dir).unwrap();

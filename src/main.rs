@@ -377,7 +377,7 @@ fn file_path(suggested: &str, ext: &str, open: bool) -> Option<PathBuf> {
 }
 
 #[derive(Debug)]
-enum Event { Command(Value) }
+enum Event { Command(Value), Update(Result<Option<String>, String>) }
 
 struct App { root: PathBuf, game_dir: PathBuf, window: Option<Window>, webview: Option<WebView>, proxy: EventLoopProxy<Event> }
 impl App {
@@ -388,14 +388,15 @@ impl App {
     }
     fn items(&self) -> Result<Vec<Collection>, String> { core::load_collections(&self.root).map_err(|e| e.to_string()) }
     fn refresh(&self) -> Result<(), String> {
+        if push::load_settings(self.game_dir()).map_err(|e|e.to_string())?.auto_merge { core::auto_merge_collections(&self.root).map_err(|e|e.to_string())?; }
         let rows: Vec<Value> = self.items()?.iter().map(|item| {
-            let source = if !item.parents.is_empty() { "合并".to_owned() } else { core::server_name(&item.server_url) };
+            let source = if !item.parents.is_empty() && !item.id.starts_with("auto-merge-") { "合并".to_owned() } else { core::server_name(&item.server_url) };
             let sp = item.scores.iter().filter(|s| s.chart < 5).count();
             json!({ "id": item.id, "name": item.name, "source": source,
                 "url": item.server_url, "player": item.nickname.as_deref().unwrap_or("—"),
                 "iidx": item.iidx_id.as_deref().unwrap_or("—"), "charts": item.scores.len(),
                 "sp": sp, "dp": item.scores.len() - sp, "date": item.captured_at,
-                "kind": if item.parents.is_empty() { "原始导出" } else { "合并结果" },
+                "kind": if item.id.starts_with("auto-merge-") { "自动合并" } else if item.parents.is_empty() { "原始导出" } else { "合并结果" },
                 "parents": item.parents })
         }).collect();
         self.send(json!({"type":"items", "items":rows}));
@@ -405,7 +406,7 @@ impl App {
     fn game_dir(&self) -> &Path { &self.game_dir }
     fn send_settings(&self) -> Result<(), String> {
         let settings=push::load_settings(self.game_dir()).map_err(|e| e.to_string())?;
-        self.send(json!({"type":"settings","autoSync":settings.auto_sync,"hasAccessCode":!settings.access_code.is_empty(),"omniOverlay":settings.omni_overlay,"pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
+        self.send(json!({"type":"settings","autoSync":settings.auto_sync,"hasAccessCode":!settings.access_code.is_empty(),"omniOverlay":settings.omni_overlay,"omniLocalOnly":settings.omni_local_only,"autoMerge":settings.auto_merge,"autoUpdate":settings.auto_update,"pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
     }
     fn send_hook_state(&self) -> Result<(), String> {
         self.send(json!({"type":"hook_state","pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
@@ -413,12 +414,20 @@ impl App {
     fn item(&self, id: &str) -> Result<Collection, String> {
         self.items()?.into_iter().find(|x| x.id == id).ok_or_else(|| "找不到这份成绩".into())
     }
+    fn check_update(&self) {
+        static STARTED: std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+        if !push::load_settings(self.game_dir()).map(|s|s.auto_update).unwrap_or(false) {return}
+        if STARTED.swap(true,std::sync::atomic::Ordering::AcqRel){return}
+        let proxy=self.proxy.clone();
+        std::thread::spawn(move || { let result=std::env::current_exe().map_err(|e|e.to_string()).and_then(|p|anytofire::update::check_and_stage(&p));let _=proxy.send_event(Event::Update(result)); });
+    }
     fn notify(&self, message: &str) { self.send(json!({"type":"toast","message":message})); }
     fn command(&self, request: Value) -> Result<(), String> {
         match request["action"].as_str().unwrap_or("") {
             "ready" => {
                 migrate_legacy_hook(self.game_dir())?;
                 self.refresh()?; self.send_settings()?;
+                self.check_update();
                 let has_access_code = !push::load_settings(self.game_dir()).map_err(|e| e.to_string())?.access_code.is_empty();
                 let needs_initialization = !initialization_marker(self.game_dir()).is_file()
                     || !self.game_dir().join("AnyToFire_data/music_omni_33_final.bin").is_file()
@@ -450,9 +459,12 @@ impl App {
                 if let Some(code)=request["accessCode"].as_str() { if !code.trim().is_empty() { settings.access_code=code.trim().to_owned(); } }
                 if let Some(enabled)=request["autoSync"].as_bool() { settings.auto_sync=enabled; }
                 if let Some(enabled)=request["omniOverlay"].as_bool() { settings.omni_overlay=enabled; }
+                if let Some(enabled)=request["omniLocalOnly"].as_bool() { settings.omni_local_only=enabled; }
+                if let Some(enabled)=request["autoMerge"].as_bool() { settings.auto_merge=enabled; }
+                if let Some(enabled)=request["autoUpdate"].as_bool() { settings.auto_update=enabled; }
                 if settings.auto_sync && settings.access_code.is_empty() { return Err("请先填写火网第三方访问码".into()); }
                 push::save_settings(self.game_dir(),&settings).map_err(|e| e.to_string())?;
-                self.send_settings()?; self.notify("设置已保存；分数显示开关在下次启动游戏时生效"); Ok(())
+                self.refresh()?; self.check_update(); self.send_settings()?; self.notify("设置已保存；Omnifix 显示与本地存分开关在下次启动游戏时生效"); Ok(())
             }
             "set_hook_source" => {
                 let source=HookSource::parse(request["source"].as_str().unwrap_or(""))?;
@@ -609,7 +621,13 @@ impl ApplicationHandler<Event> for App {
         if let WindowEvent::CloseRequested = event { event_loop.exit(); }
     }
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: Event) {
-        let Event::Command(request) = event;
+        let request=match event {
+            Event::Command(request)=>request,
+            Event::Update(result)=>{match result {
+                Ok(Some(version))=>self.notify(&format!("{version} 已下载，退出游戏和软件后自动安装")),
+                Ok(None)=>{},Err(error)=>trace(&format!("自动更新检查未完成: {error}")),
+            } return;}
+        };
         if let Err(error) = self.command(request) { self.send(json!({"type":"error","message":error})); }
     }
 }

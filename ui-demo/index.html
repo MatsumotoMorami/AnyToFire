@@ -37,7 +37,7 @@
     .settings-trigger svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
     .login-backdrop { display: flex; position: fixed; inset: 0; z-index: 40; background: #0f211d9c; backdrop-filter: blur(4px); align-items: center; justify-content: center; padding: 20px; opacity: 0; visibility: hidden; pointer-events: none; transition: opacity .2s ease, visibility .2s ease; }
     .login-backdrop.open { opacity: 1; visibility: visible; pointer-events: auto; }
-    .login-panel { width: min(380px, 100%); padding: 26px; background: white; border: 1px solid var(--line); border-radius: 17px; box-shadow: 0 25px 80px #0d181855; opacity: 0; transform: translateY(10px) scale(.985); transition: opacity .2s ease, transform .2s ease; }
+    .login-panel { max-height:calc(100dvh - 40px); overflow-y:auto; width: min(380px, 100%); padding: 26px; background: white; border: 1px solid var(--line); border-radius: 17px; box-shadow: 0 25px 80px #0d181855; opacity: 0; transform: translateY(10px) scale(.985); transition: opacity .2s ease, transform .2s ease; }
     .login-backdrop.open .login-panel { opacity: 1; transform: none; }
     .login-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 22px; }
     .login-head h2 { font-size: 20px; }
@@ -147,7 +147,9 @@
     @media (prefers-reduced-motion: reduce) { .login-backdrop, .login-panel, .modal-backdrop, .modal, .btn, .view-switch button, .toast { transition-duration: 0s; } #archive-view:not([hidden]), #recent-view:not([hidden]), .list-refreshed, .init-steps > div.active::before { animation-duration: 0s; } }
     @media (max-width: 1080px) { main { padding: 0 22px 35px; } .stat-grid { gap: 9px; } .stat { padding: 16px; } }
     @media (max-width: 600px) { main { padding: 0 13px 28px; } .topline { height: 60px; } .brand-mark { width: 32px; height: 32px; } .brand-mark img { width: 23px; height: 23px; } .brand-name { font-size: 16px; } .page-intro { margin: 25px 0 20px; flex-wrap: wrap; } h1 { font-size: 26px; } .stat-grid { gap: 7px; } .stat { min-height: 80px; padding: 12px 9px; } .stat-label { font-size: 10px; } .stat-value { font-size: 21px; } .workspace-head { padding: 17px 13px; flex-wrap: wrap; } #archive-actions { width: 100%; } .toolbar { padding: 0 13px 13px; } .search { width: 100%; } .toolbar-spacer { display: none; } .workspace-foot { padding: 0 13px; } }
-  </style>
+   .table-sort {border:0;background:none;color:inherit;font:inherit;cursor:pointer;padding:0;text-align:left;white-space:nowrap;} .table-sort:hover {color:#cb5134;} .table-sort:focus-visible {outline:2px solid #cb5134;outline-offset:5px;} .table-sort span {opacity:.65;}
+
+</style>
 </head>
 <body>
   <svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
@@ -175,10 +177,29 @@
   </div>
   <div class="login-backdrop" id="init-backdrop"><div class="login-panel init-panel" role="dialog" aria-modal="true" aria-labelledby="init-title"><div class="login-head"><h2 id="init-title">初始化</h2></div><div class="init-version" id="init-version">正在识别游戏版本…</div><div class="init-steps"><div id="init-step-version">识别游戏版本</div><div id="init-step-score">初始化 IIDXScore</div><div id="init-step-migrate" hidden>旧版本 IIDXScore 迁移</div><div id="init-step-inject">注入 DLL</div></div><div class="init-status" id="init-status">正在准备…</div><button class="btn btn-primary login-submit" id="init-retry" type="button" hidden>重试</button></div></div>
   <div class="login-backdrop" id="guide-backdrop"><div class="login-panel guide-panel" role="dialog" aria-modal="true" aria-labelledby="guide-title"><div class="login-head"><h2 id="guide-title">使用说明</h2><button class="login-close" id="guide-close" type="button" aria-label="关闭">&times;</button></div><div class="guide-copy"><p>本项目 AnyToFire 的功能包含：任意网的游戏档案保存与本地合并、任意网自动同步具体成绩至 FireNet，以及旧 IIDXScore 插件的全部功能（包括 Omnifix 分数本地保存与游戏内显示）。</p><strong>使用前准备</strong><p>使用火网打开 IIDX 并创建档案，在软件内填入 Firenet <b>第三方访问码</b>。</p><strong>推荐：自动同步</strong><p>挂载 DLL、填写访问码并开启自动同步后，符合条件的每局成绩会自动上传。无需上传游戏档案，也无需手动上传最近游玩分数。上传成功的单局会标记“已上传”；再次手动上传前会提示确认。omni 等不支持的曲目不会上传。</p><strong>慎用：档案同步</strong><p>游戏档案只保存每张谱面的最优成绩，无法还原每次游玩的分数与时间，也无法准确记录游玩次数。</p></div></div></div>
-  <div class="login-backdrop" id="settings-backdrop"><div class="login-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="login-head"><h2 id="settings-title">设置</h2><button class="login-close" id="settings-close" type="button" aria-label="关闭">&times;</button></div><label for="access-code">火网第三方访问码</label><input id="access-code" type="password" autocomplete="off" placeholder="填写访问码"><div class="setting-row"><span id="plugin-enabled-label">启用该插件</span><button class="setting-switch" id="plugin-enabled" type="button" role="switch" aria-labelledby="plugin-enabled-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-sync-label">开启自动同步</span><button class="setting-switch" id="auto-sync" type="button" role="switch" aria-labelledby="auto-sync-label" aria-checked="false"></button></div><div class="setting-row"><span id="omni-overlay-label">Omnifix 歌曲分数游戏内显示</span><button class="setting-switch" id="omni-overlay" type="button" role="switch" aria-labelledby="omni-overlay-label" aria-checked="true"></button></div><button class="btn btn-primary login-submit" id="save-sync" type="button">保存设置</button><button class="btn btn-light logout-button" id="logout" type="button">清除访问码</button></div></div>
+  <div class="login-backdrop" id="settings-backdrop"><div class="login-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="login-head"><h2 id="settings-title">设置</h2><button class="login-close" id="settings-close" type="button" aria-label="关闭">&times;</button></div><label for="access-code">火网第三方访问码</label><input id="access-code" type="password" autocomplete="off" placeholder="填写访问码"><div class="setting-row"><span id="plugin-enabled-label">启用该插件</span><button class="setting-switch" id="plugin-enabled" type="button" role="switch" aria-labelledby="plugin-enabled-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-sync-label">开启自动同步</span><button class="setting-switch" id="auto-sync" type="button" role="switch" aria-labelledby="auto-sync-label" aria-checked="false"></button></div><div class="setting-row"><span id="omni-overlay-label">Omnifix 歌曲分数游戏内显示</span><button class="setting-switch" id="omni-overlay" type="button" role="switch" aria-labelledby="omni-overlay-label" aria-checked="true"></button></div><div class="setting-row"><span id="auto-merge-label">开启同一档案自动合并</span><button class="setting-switch" id="auto-merge" type="button" role="switch" aria-labelledby="auto-merge-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-update-label">自动更新</span><button class="setting-switch" id="auto-update" type="button" role="switch" aria-labelledby="auto-update-label" aria-checked="true"></button></div><button class="btn btn-primary login-submit" id="save-sync" type="button">保存设置</button><button class="btn btn-light logout-button" id="logout" type="button">清除访问码</button></div></div>
   <div class="modal-backdrop" id="modal-backdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-icon" id="modal-icon"><svg width="19" height="19" fill="none" stroke="currentColor"><use href="#i-merge"/></svg></div><h3 id="modal-title"></h3><label class="field-label" for="modal-input" id="modal-label"></label><input id="modal-input" maxlength="80"><select class="filter" id="modal-format" aria-label="导出格式"><option value="Fervidex JSON">Fervidex JSON</option><option value="KONAMI CSV">KONAMI CSV</option><option value="Asphyxia DB">Asphyxia DB</option></select><div class="modal-actions"><button class="btn btn-plain" id="modal-cancel" type="button">取消</button><button class="btn btn-primary" id="modal-confirm" type="button">确认</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>
+let archiveSort = null;
+let recentSort = {key:'occurredAt', direction:-1};
+const sortText = new Intl.Collator('zh-CN', {numeric:true, sensitivity:'base'});
+function compareRows(a,b,sort) {
+  let av=a[sort.key], bv=b[sort.key];
+  if(sort.key==='occurredAt'){av=Date.parse(av);bv=Date.parse(bv);av=Number.isNaN(av)?null:av;bv=Number.isNaN(bv)?null:bv;}
+  if(av == null || bv == null) return av == null ? (bv == null ? 0 : 1) : -1;
+  const value=typeof av === 'number' && typeof bv === 'number' ? av-bv : sortText.compare(String(av),String(bv));
+  return value*sort.direction || sortText.compare(String(a.id || a.eventId),String(b.id || b.eventId));
+}
+function sortHeader(label,key,group,sort) {
+  const active=sort?.key===key;
+  return `<th aria-sort="${active ? (sort.direction===1?'ascending':'descending'):'none'}"><button class="table-sort" data-sort="${key}" data-sort-group="${group}">${label}<span aria-hidden="true">${active?(sort.direction===1?' ↑':' ↓'):' ↕'}</span></button></th>`;
+}
+function updateArchiveHeaders() {
+  const row=el('rows').closest('table').tHead.rows[0];
+  [['成绩来源','name'],['玩家','player'],['谱面','charts'],['类型','kind'],['导出时间','date']].forEach(([label,key],i)=>{row.cells[i+1].outerHTML=sortHeader(label,key,'archives',archiveSort);});
+}
+
     const demo = [
       { id: 'bjm-1', name: 'BJM · 秋季存档', source: 'BJM', url: 'http://server.bjmania.com:20573/core/', player: 'REN*', iidx: '2486-7153', charts: 2486, sp: 1394, dp: 1092, date: '2026-10-20 19:42', kind: '原始导出', parents: [] },
       { id: 'fire-1', name: 'Firenet', source: 'Firenet', url: 'https://firenet.example/core/', player: 'REN*', iidx: '2486-7153', charts: 2318, sp: 1270, dp: 1048, date: '2026-10-18 23:16', kind: '原始导出', parents: [] },
@@ -219,9 +240,10 @@
       const query = el('search').value.trim().toLocaleLowerCase();
       const source = el('source-filter').value;
       const order = el('sort').value;
-      return items.filter(x => (source === 'all' || x.source === source) && (!query || [x.name,x.player,x.iidx,x.url].some(v => v.toLocaleLowerCase().includes(query)))).sort((a,b) => order === 'charts' ? b.charts-a.charts : order === 'oldest' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
+      return items.filter(x => (source === 'all' || x.source === source) && (!query || [x.name,x.player,x.iidx,x.url].some(v => v.toLocaleLowerCase().includes(query)))).sort((a,b) => archiveSort ? compareRows(a,b,archiveSort) : order === 'charts' ? b.charts-a.charts : order === 'oldest' ? a.date.localeCompare(b.date) : b.date.localeCompare(a.date));
     }
     function render() {
+      updateArchiveHeaders();
       const visible = filtered();
       el('rows').innerHTML = visible.map(item => `<tr class="${selection.has(item.id) ? 'selected' : ''}">
         <td><input type="checkbox" class="row-check" data-id="${escapeHtml(item.id)}" aria-label="选择 ${escapeHtml(item.name)}" ${selection.has(item.id) ? 'checked' : ''}></td>
@@ -247,7 +269,7 @@
     }
     function toast(message) { el('toast').textContent = message; el('toast').classList.add('show'); clearTimeout(toast.timer); toast.timer = setTimeout(() => el('toast').classList.remove('show'), 3200); }
     function renderRecent() {
-      el('recent-list').innerHTML = `<table><thead><tr><th><input id="recent-select-all" type="checkbox" aria-label="选择所有可上传单局"></th><th>时间</th><th>游戏版本</th><th>曲目</th><th>EX Score</th><th>同步</th></tr></thead><tbody>${recentItems.map(x => `<tr class="${x.uploadedAt ? 'recent-uploaded' : ''} ${recentSelection.has(x.eventId) ? 'selected' : ''}"><td><input class="recent-check" type="checkbox" data-id="${x.eventId}" aria-label="选择 ${escapeHtml(musicTitle(x))}" ${recentSelection.has(x.eventId) ? 'checked' : ''} ${!x.uploadAllowed ? 'disabled' : ''}></td><td>${escapeHtml(displayTime(x.occurredAt))}</td><td>${versionName(x.module)}</td><td class="recent-title" title="${escapeHtml(musicTitle(x))}">${escapeHtml(musicTitle(x))}</td><td>${x.exScore ?? '—'}</td><td>${syncBadge(x)}</td></tr>`).join('')}</tbody></table>`;
+      el('recent-list').innerHTML = `<table><thead><tr><th><input id="recent-select-all" type="checkbox" aria-label="选择所有可上传单局"></th>${sortHeader('时间','occurredAt','recent',recentSort)}${sortHeader('游戏版本','module','recent',recentSort)}${sortHeader('曲目','title','recent',recentSort)}${sortHeader('EX Score','exScore','recent',recentSort)}${sortHeader('同步','syncSort','recent',recentSort)}</tr></thead><tbody>${recentItems.map(x=>({...x,title:musicTitle(x),syncSort:x.uploadedAt?'已上传':!x.uploadAllowed?'拒绝':x.blocked?'错误':'待上传'})).sort((a,b)=>compareRows(a,b,recentSort)).map(x => `<tr class="${x.uploadedAt ? 'recent-uploaded' : ''} ${recentSelection.has(x.eventId) ? 'selected' : ''}"><td><input class="recent-check" type="checkbox" data-id="${x.eventId}" aria-label="选择 ${escapeHtml(musicTitle(x))}" ${recentSelection.has(x.eventId) ? 'checked' : ''} ${!x.uploadAllowed ? 'disabled' : ''}></td><td>${escapeHtml(displayTime(x.occurredAt))}</td><td>${versionName(x.module)}</td><td class="recent-title" title="${escapeHtml(musicTitle(x))}">${escapeHtml(musicTitle(x))}</td><td>${x.exScore ?? '—'}</td><td>${syncBadge(x)}</td></tr>`).join('')}</tbody></table>`;
       el('recent-select-all').checked = recentItems.filter(x => x.uploadAllowed).every(x => recentSelection.has(x.eventId));
       el('upload-recent').disabled = recentSelection.size === 0;
       el('upload-recent').textContent = `上传所选 ${recentSelection.size}`;
@@ -323,7 +345,9 @@
     });
     el('rows').addEventListener('click', event => { const exportButton = event.target.closest('.row-export'); const renameButton = event.target.closest('.row-rename'); const deleteButton = event.target.closest('.row-delete'); if (exportButton) exportDialog(exportButton.dataset.id); if (renameButton) renameDialog(renameButton.dataset.id); if (deleteButton) deleteDialog(deleteButton.dataset.id); });
     el('select-all').addEventListener('change', event => { filtered().forEach(x => event.target.checked ? selection.add(x.id) : selection.delete(x.id)); render(); });
-    ['search','source-filter','sort'].forEach(id => el(id).addEventListener(id === 'search' ? 'input' : 'change', render));
+    el('sort').addEventListener('change',()=>{archiveSort=null;});
+document.addEventListener('click',event=>{const button=event.target.closest('[data-sort]');if(!button)return;const key=button.dataset.sort;if(button.dataset.sortGroup==='recent'){recentSort={key,direction:recentSort.key===key?-recentSort.direction:1};renderRecent();}else{archiveSort={key,direction:archiveSort?.key===key?-archiveSort.direction:1};render();}});
+['search','source-filter','sort'].forEach(id => el(id).addEventListener(id === 'search' ? 'input' : 'change', render));
     el('hero-merge').addEventListener('click', mergeDialog);
     function switchView(view) {
       const archives = view === 'archives';
@@ -353,7 +377,8 @@
       el('access-code').placeholder = demoHasCode ? '已填写' : '填写访问码';
       toast('演示：设置已保存');
     });
-    el('logout').addEventListener('click', () => { demoHasCode = false; el('access-code').value = ''; el('access-code').placeholder = '填写访问码'; el('auto-sync').setAttribute('aria-checked','false'); toast('演示：已清除访问码'); });
+    ['auto-merge','auto-update'].forEach(id=>el(id).addEventListener('click',()=>el(id).setAttribute('aria-checked',String(el(id).getAttribute('aria-checked')!=='true'))));
+el('logout').addEventListener('click', () => { demoHasCode = false; el('access-code').value = ''; el('access-code').placeholder = '填写访问码'; el('auto-sync').setAttribute('aria-checked','false'); toast('演示：已清除访问码'); });
     let showSettingsAfterGuide = false;
     let demoInitPending = false;
     function startDemoInit() {
