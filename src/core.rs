@@ -228,14 +228,14 @@ pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
     all.sort_by(|a,b| b.captured_at.cmp(&a.captured_at)); Ok(all)
 }
 
-/// Keep raw snapshots; update one deterministic aggregate per exact server,
+/// Archive consumed snapshots after saving one deterministic aggregate per exact server,
 /// verified player and catalog. Never infer player identity from nickname.
 pub fn auto_merge_collections(root: &Path) -> io::Result<usize> {
     #[cfg(windows)]
     let _guard=MergeGuard::acquire(root)?;
     let all=load_collections(root)?;
     let mut groups: BTreeMap<(String,String,String),Vec<Collection>>=BTreeMap::new();
-    for item in all.iter().filter(|x|x.parents.is_empty() && !x.server_url.is_empty() && x.server_url!="合并") {
+    for item in all.iter().filter(|x|(x.parents.is_empty() || x.id.starts_with("auto-merge-")) && !x.server_url.is_empty() && x.server_url!="合并") {
         let Some(player)=item.iidx_id.as_deref().filter(|id|id.len()==9 && id.as_bytes()[4]==b'-' && id.bytes().enumerate().all(|(i,b)|i==4||b.is_ascii_digit())) else {continue};
         groups.entry((item.server_url.trim_end_matches('/').to_owned(),player.to_owned(),item.catalog_sha256.clone())).or_default().push(item.clone());
     }
@@ -245,10 +245,20 @@ pub fn auto_merge_collections(root: &Path) -> io::Result<usize> {
         let id=format!("auto-merge-{:x}",Sha256::digest(serde_json::to_vec(&(&server,&player,&hash))?));
         let name=all.iter().find(|x|x.id==id).map(|x|x.name.clone()).unwrap_or_else(||format!("{} · {} · 自动合并",server_name(&server),group.iter().find_map(|x|x.nickname.as_deref()).unwrap_or(&player)));
         let Ok(mut merged)=merge(&group,name) else {continue};
+        // Carry earlier bests forward after their source snapshots leave the list.
+        merged.parents=group.iter().flat_map(|x| if x.id.starts_with("auto-merge-") {x.parents.clone()} else {vec![x.id.clone()]}).collect();
+        merged.parents.sort();merged.parents.dedup();
         merged.id=id;merged.server_url=group[0].server_url.clone();merged.player_internal=group[0].player_internal.clone();
         merged.captured_at=group.iter().map(|x|x.captured_at.clone()).max().unwrap_or_default();
-        if all.iter().any(|x|x.id==merged.id && x.parents==merged.parents && x.scores==merged.scores && x.nickname==merged.nickname && x.captured_at==merged.captured_at){continue}
-        write_collection(root,&merged)?;changed+=1;
+        if !all.iter().any(|x|x.id==merged.id && x.parents==merged.parents && x.scores==merged.scores && x.nickname==merged.nickname && x.captured_at==merged.captured_at) {
+            changed+=1;
+        }
+        write_collection(root,&merged)?;
+        // Only remove sources after every output format was successfully saved.
+        // Reuse the recoverable deletion mechanism, including on interrupted retries.
+        for item in group.iter().filter(|x|x.id!=merged.id) {
+            archive_collection(root,&item.id)?;
+        }
     }
     Ok(changed)
 }
@@ -321,7 +331,7 @@ pub fn archive_collection(root: &Path, id: &str) -> io::Result<PathBuf> {
         let a = collection("a", 1500, Some(30), 5); let b = collection("b", 1400, Some(20), 6);
         let m = merge(&[a,b], "合并".into()).unwrap(); assert_eq!(m.scores[0].ex,1500); assert_eq!(m.scores[0].bp,Some(20)); assert_eq!(m.scores[0].lamp,6); assert_eq!(m.parents.len(),2);
     }
-    #[test] fn automatic_merge_is_scoped_idempotent_and_retains_originals() {
+    #[test] fn automatic_merge_archives_sources_and_keeps_previous_bests() {
         let root=std::env::temp_dir().join(format!("atf-automerge-{}",new_id()));
         let mut a=collection("a",1500,Some(30),5);a.server_url="https://one.example/".into();
         let mut b=a.clone();b.id="b".into();b.scores[0].lamp=6;b.scores[0].bp=Some(20);
@@ -331,12 +341,18 @@ pub fn archive_collection(root: &Path, id: &str) -> io::Result<PathBuf> {
         let mut unknown=b.clone();unknown.id="unknown".into();unknown.iidx_id=None;
         for c in [&a,&b,&other,&player,&catalog,&unknown] {write_collection(&root,c).unwrap();}
         assert_eq!(auto_merge_collections(&root).unwrap(),1);
-        let all=load_collections(&root).unwrap();assert_eq!(all.len(),7);
+        let all=load_collections(&root).unwrap();assert_eq!(all.len(),5);
         let m=all.iter().find(|x|x.id.starts_with("auto-merge-")).unwrap();
         assert_eq!(m.parents,vec!["a","b"]);assert_eq!(m.scores[0].ex,1500);assert_eq!(m.scores[0].lamp,6);assert_eq!(m.scores[0].bp,Some(20));
         assert_eq!(auto_merge_collections(&root).unwrap(),0);
         b.scores[0].ex=1700;write_collection(&root,&b).unwrap();assert_eq!(auto_merge_collections(&root).unwrap(),1);
-        assert_eq!(load_collections(&root).unwrap().len(),7);
+        let all=load_collections(&root).unwrap();assert_eq!(all.len(),5);
+        let m=all.iter().find(|x|x.id.starts_with("auto-merge-")).unwrap();
+        assert_eq!(m.scores[0].ex,1700);assert_eq!(m.scores[0].bp,Some(20));
+        assert_eq!(m.parents,vec!["a","b"]);
+        assert!(!root.join("a").exists() && !root.join("b").exists());
+        assert_eq!(fs::read_dir(root.join(".deleted")).unwrap().count(),3);
+        assert_eq!(auto_merge_collections(&root).unwrap(),0);
         fs::remove_dir_all(root).unwrap();
     }
     #[test] fn merge_rejects_unknown_identity() {
