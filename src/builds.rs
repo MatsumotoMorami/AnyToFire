@@ -1,4 +1,4 @@
-// Generated from the five user-supplied bm2dx.dll files by tools/generate-builds.cjs.
+// Generated from bm2dx.dll fixtures by tools/generate-builds.cjs.
 #[derive(Clone, Copy)]
 pub struct MethodSignature { pub rva: usize, pub slot: usize, pub sha256: &'static str }
 pub struct Build { pub name: &'static str, pub version: u32, pub timestamp: u32, pub image_size: u32, pub rank: MethodSignature, pub profile: MethodSignature, pub reg: MethodSignature, pub reg_response: MethodSignature, pub appoint: MethodSignature }
@@ -44,5 +44,12 @@ pub const BUILDS: &[Build] = &[
         reg: MethodSignature { rva: 0xac26f0, slot: 0x1053190, sha256: "d204ee63026e59a8a89ec1158d6b9c21197d7d5961f7a56673d1f303d3a2b765" },
         reg_response: MethodSignature { rva: 0xac17a0, slot: 0x1053198, sha256: "d81758e7bf7637ced95a96deb425f7774d2c8a71f545e0d676db6a5ec7f67f0f" },
         appoint: MethodSignature { rva: 0xabd710, slot: 0x10531f8, sha256: "5a794910b89df9bb0a7257ad3b58284ac9a687f47afbf7f82adff0c3d987ffdf" },
+    },
+    Build { name: "1027", version: 34, timestamp: 0x6ad9970d, image_size: 0xc5a3000,
+        rank: MethodSignature { rva: 0xa9c480, slot: 0x10250a8, sha256: "be3dd6a85dc21799d0cbc533249cf519c58559a0ee190e11ac5c3417f0da6306" },
+        profile: MethodSignature { rva: 0xa86350, slot: 0x1024688, sha256: "7a1cb3b5127552bb79842f98c04217acc682f7fcd56395499ca9660bcad27785" },
+        reg: MethodSignature { rva: 0xa9fa10, slot: 0x1025160, sha256: "f139298521b5b9bc5e94af370c6499d0403d87b0a18ac4fc96c374e7d1ec9e97" },
+        reg_response: MethodSignature { rva: 0xa9eac0, slot: 0x1025168, sha256: "eb996b19b2409e942cc95948339a3a53d97fcea753fe20762c118947b4789fd7" },
+        appoint: MethodSignature { rva: 0xa9aa30, slot: 0x10251c8, sha256: "dd642085605041a69013e826feb843d633c777c069839fb6f39aba4867cb05a3" },
     },
 ];

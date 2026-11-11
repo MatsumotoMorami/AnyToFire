@@ -15,5 +15,9 @@ function hash(start,end){let x=b.subarray(offset(start),offset(start)+(end-start
 console.log(path,'timestamp',b.readUInt32LE(pe+8).toString(16),'imageSize',b.readUInt32LE(opt+56).toString(16));
 for(const name of ['getrank','getranksub','get','reg','appoint'])named(name);
 if(process.argv[3]){for(const spec of process.argv.slice(3)){const [a,z]=spec.split('-').map(x=>parseInt(x,16));console.log(JSON.stringify(hash(a,z)))}}
-const slots = b.readUInt32LE(pe+8)===0x69c347cc?[0x104b5a8,0x104abe8,0x104b660,0x104b668,0x104b6c8]:b.readUInt32LE(pe+8)===0x69ddf5f8?[0x10535f8,0x1052c38,0x10536b0,0x10536b8,0x1053718]:b.readUInt32LE(pe+8)===0x6a8bafd1?[0x1090d88,0x10903c8,0x1090e40,0x1090e48,0x1090ea8]:[0x10540e8,0x10536c8,0x10541a0,0x10541a8,0x1054208];
+const source = fs.readFileSync(require('path').join(__dirname,'../src/builds.rs'),'utf8');
+const timestamp = b.readUInt32LE(pe+8).toString(16), imageSize = b.readUInt32LE(opt+56).toString(16);
+const build = [...source.matchAll(/    Build \{ name: "([^"]+)", version: \d+, timestamp: 0x([a-f0-9]+), image_size: 0x([a-f0-9]+),([\s\S]*?)\n    \},/g)]
+    .find(([, , stamp, size])=>stamp===timestamp && size===imageSize);
+const slots = build ? [...build[4].matchAll(/slot: 0x([a-f0-9]+),/g)].map(([, slot])=>parseInt(slot,16)) : [];
 for(const slot of slots){const target=Number(ptr(offset(slot))-image);if(target>0&&target<0x2000000)console.log('method',slot.toString(16),target.toString(16),crypto.createHash('sha256').update(b.subarray(offset(target),offset(target)+256)).digest('hex'));}
