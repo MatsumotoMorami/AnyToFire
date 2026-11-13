@@ -8,11 +8,12 @@ const builds=[
  ['1013',34,[0x10530d8,0x10526b8,0x1053190,0x1053198,0x10531f8]],
  ['1027',34,[0x10250a8,0x1024688,0x1025160,0x1025168,0x10251c8]],
  ['012-0916',34,[0xf550e8,0xf546c8,0xf551a0,0xf551a8,0xf55208]],
+ ['012-1027',34,[0xf260a8,0xf25688,0xf26160,0xf26168,0xf261c8]],
 ];
 const args=process.argv.slice(2);
 const single=args[0]==='--build' && args.length===3 && builds.find(([name])=>name===args[1]);
 if(!single && (args[0]==='--build' || args.length<5 || args.length>builds.length))
- throw Error('Usage: node tools/generate-builds.cjs --build <build> <bm2dx.dll>\n   or: node tools/generate-builds.cjs <0331.dll> <0422.dll> <0909.dll> <0916.dll> <0917.dll> [1013.dll] [1027.dll] [012-0916.dll]');
+ throw Error('Usage: node tools/generate-builds.cjs --build <build> <bm2dx.dll>\n   or: node tools/generate-builds.cjs <0331.dll> <0422.dll> <0909.dll> <0916.dll> <0917.dll> [1013.dll] [1027.dll] [012-0916.dll] [012-1027.dll]');
 const fixtures=single?[[single,args[2]]]:args.map((path,i)=>[builds[i],path]);
 const existing=fs.readFileSync('src/builds.rs','utf8');
 let out=existing;
