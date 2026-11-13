@@ -37,9 +37,10 @@ const PAGE_READWRITE: u32 = 4;
 const TRUSTED_AC_CATALOG_SHA256: &str = "2a817e42e9d9f6485b81b67104656da9f350c7106af9be15ec21c1e6ea147455";
 // User-supplied 1013 AC index, separate from optional music_omni.bin.
 const TRUSTED_AC_1013_SHA256: &str = "d197e9cac27ab758e40c7351529eeae7d80165400adfae9535ff2ea7d0ab8bb0";
+const TRUSTED_AC_1027_SHA256: &str = "78ad5f1150602fc8e95265c26526395a016f0d3ea3cc72c2f2c3979695509d30";
 const TRUSTED_AC_33_SHA256: &str = "6b7bed978c2734276412f6b51c6624f75a004ddf8257826f622c8fe8415721fc";
 fn trusted_catalog(catalog: &Catalog) -> bool {
-    (catalog.version == 34 && (catalog.sha256 == TRUSTED_AC_CATALOG_SHA256 || catalog.sha256 == TRUSTED_AC_1013_SHA256))
+    (catalog.version == 34 && matches!(catalog.sha256.as_str(), TRUSTED_AC_CATALOG_SHA256 | TRUSTED_AC_1013_SHA256 | TRUSTED_AC_1027_SHA256))
         || (catalog.version == 33 && catalog.sha256 == TRUSTED_AC_33_SHA256)
 }
 
@@ -145,32 +146,44 @@ fn detect_build(base: usize, version: u32) -> Option<&'static Build> {
         && signature_matches(base, &build.rank))
 }
 fn build() -> &'static Build { GAME_BUILD.get().copied().expect("validated game build") }
-fn is_score_hook(address: usize) -> bool {
+fn module_at(address: usize) -> Option<usize> {
     let mut module = std::ptr::null_mut();
-    if unsafe { GetModuleHandleExW(6, address as *const u16, &mut module) } == 0 { return false; }
-    module_path(module as usize).and_then(|p| p.file_name().map(|x| x.to_string_lossy().to_string())).is_some_and(|x| x.eq_ignore_ascii_case("IIDXScore.dll"))
+    (unsafe { GetModuleHandleExW(6, address as *const u16, &mut module) } != 0).then_some(module as usize)
+}
+fn module_name_at(address: usize) -> Option<String> {
+    module_name(module_at(address)?)
+}
+fn module_name(module: usize) -> Option<String> {
+    module_path(module).and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+}
+fn is_score_hook(address: usize) -> bool {
+    module_name_at(address).is_some_and(|name| name.eq_ignore_ascii_case("IIDXScore.dll"))
 }
 fn is_known_reg_hook(address: usize) -> bool { is_score_hook(address) }
-fn detour_owned_by_omnifix(mut address: usize) -> bool {
+fn detour_target_module(base: usize, mut address: usize) -> Option<String> {
     for _ in 0..4 {
-        let mut module = std::ptr::null_mut();
-        if unsafe { GetModuleHandleExW(6,address as *const u16,&mut module) }!=0 {
-            if module_path(module as usize).and_then(|p|p.file_name().map(|n|n.to_string_lossy().into_owned()))
-                .is_some_and(|n|n.eq_ignore_ascii_case("omnifix.dll")){return true}
+        // A relay can end at the page boundary. Read only the bytes belonging
+        // to the instruction and its pointer, even when the next page is unmapped.
+        let mut opcode = [0; 2];
+        if !read(address, &mut opcode) { return None; }
+        address = match opcode {
+            [0xe9, _] => (address + 5).wrapping_add_signed(read_u32(address + 1)? as i32 as isize),
+            [0xff, 0x25] => {
+                let displacement = read_u32(address + 2)? as i32 as isize;
+                read_u64((address + 6).wrapping_add_signed(displacement))? as usize
+            }
+            [0x48, 0xb8] => {
+                let mut jump = [0; 2];
+                if !read(address + 10, &mut jump) || jump != [0xff, 0xe0] { return None; }
+                read_u64(address + 2)? as usize
+            }
+            _ => return None,
+        };
+        if let Some(module) = module_at(address).filter(|&module| module != base) {
+            return module_name(module);
         }
-        let mut bytes=[0u8;16];if !read(address,&mut bytes){return false}
-        if bytes[0]==0xe9 {
-            let displacement=i32::from_le_bytes(bytes[1..5].try_into().unwrap()) as isize;
-            address=(address+5).wrapping_add_signed(displacement);
-        } else if bytes[..2]==[0xff,0x25] {
-            let displacement=i32::from_le_bytes(bytes[2..6].try_into().unwrap()) as isize;
-            let Some(next)=read_u64((address+6).wrapping_add_signed(displacement)) else{return false};
-            address=next as usize;
-        } else if bytes[..2]==[0x48,0xb8] && bytes[10..12]==[0xff,0xe0] {
-            address=u64::from_le_bytes(bytes[2..10].try_into().unwrap()) as usize;
-        } else {return false}
     }
-    false
+    None
 }
 fn original_file_method(base:usize,method:&MethodSignature)->Option<Vec<u8>> {
     let data=fs::read(module_path(base)?).ok()?;
@@ -206,7 +219,28 @@ fn wait_for_score_hooks(base:usize)->bool{
 }
 fn validate_profile(base: usize) -> bool {
     let method = &build().profile;
-    read_u64(base + method.slot) == Some((base + method.rva) as u64) && signature_matches(base, method)
+    if read_u64(base + method.slot) != Some((base + method.rva) as u64) { return false; }
+    if signature_matches(base, method) { return true; }
+    let compatible = validate_inline_detour(base, method, "firenet.dll");
+    if compatible { log("检测到 FireNet pc.get 响应钩子：保留其入口，通过 XRPC 分发表接续读取资料"); }
+    compatible
+}
+fn log_hook_mismatch(name: &str, base: usize, method: &MethodSignature) {
+    let entry = base + method.rva;
+    let slot = read_u64(base + method.slot).map(|value| value as usize);
+    let slot_state = match slot {
+        Some(address) if address == entry => "原生入口".to_owned(),
+        Some(address) => module_name_at(address).unwrap_or_else(|| "未知模块".to_owned()),
+        None => "不可读".to_owned(),
+    };
+    let mut prefix = [0; 16];
+    let prefix = if read(entry, &mut prefix) {
+        prefix.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
+    } else {
+        "不可读".to_owned()
+    };
+    let target = detour_target_module(base, entry).unwrap_or_else(|| "未知".to_owned());
+    log(&format!("{name} 校验详情：分发表={slot_state}，内存入口={prefix}，跳转目标模块={target}"));
 }
 fn replace_slot(slot: usize, expected: usize, new: usize) -> bool {
     let slot = slot as *mut *mut c_void; let mut old = 0u32;
@@ -230,7 +264,10 @@ fn install(base: usize) -> bool {
         let _ = ORIGINAL_PROFILE.set(original);
         if replace_slot(base + build().profile.slot, base + build().profile.rva, profile_hook as *const () as usize) { log("pc.get 资料钩子已安装"); }
         else { log("pc.get 资料钩子被占用；成绩仍会导出，但身份可能为空"); }
-    } else { log("pc.get 资料 ABI 未匹配；成绩仍会导出，但身份可能为空"); }
+    } else {
+        log("pc.get 资料 ABI 未匹配；成绩仍会导出，但身份可能为空");
+        log_hook_mismatch("pc.get", base, &build().profile);
+    }
     let mut reg_installed=false;
     if validate_reg(base) {
         if let Some(previous) = read_u64(base + build().reg.slot).map(|x| x as usize) {
@@ -239,7 +276,10 @@ fn install(base: usize) -> bool {
                 else { log("music.reg 钩子安装失败；单局采集不可用"); }
             } else { log("music.reg 槽位被未知插件占用；单局采集不可用"); }
         }
-    } else { log("music.reg ABI 未匹配；单局采集不可用"); }
+    } else {
+        log("music.reg ABI 未匹配；单局采集不可用");
+        log_hook_mismatch("music.reg", base, &build().reg);
+    }
     if SCORE_STORE.get().is_some() && !chained && reg_installed {
         SCORE_ACTIVE.store(true,Ordering::Release);
         if validate_appoint(base) {
@@ -271,12 +311,16 @@ fn validate_reg(base: usize) -> bool {
     // Omnifix wraps this same writer inline. Keep its entry intact and wrap
     // only the XRPC dispatch slot. Accept only a jump chain into omnifix.dll,
     // with a trusted on-disk baseline and unchanged code after its prologue.
-    let Some(original)=original_file_method(base,method) else{return false};
-    let mut current=[0u8;256];
-    let compatible=sha(&original)==method.sha256 && read(base+method.rva,&mut current)
-        && original[32..]==current[32..] && detour_owned_by_omnifix(base+method.rva);
+    let compatible = validate_inline_detour(base, method, "omnifix.dll");
     if compatible{log("检测到 Omnifix 原生组包挂钩：保留其入口，通过 XRPC 分发表接续采集及上传拦截");}
     compatible
+}
+fn validate_inline_detour(base: usize, method: &MethodSignature, owner: &str) -> bool {
+    let entry = base + method.rva;
+    if !detour_target_module(base, entry).is_some_and(|name| name.eq_ignore_ascii_case(owner)) { return false; }
+    let Some(original) = original_file_method(base, method) else { return false; };
+    let mut current = [0u8; 256];
+    sha(&original) == method.sha256 && read(entry, &mut current) && original[32..] == current[32..]
 }
 fn validate_reg_response(base: usize) -> bool {
     signature_matches(base, &build().reg_response)
@@ -473,25 +517,39 @@ fn reg_identity(tree: &Value) -> Option<(u32, u8)> {
 fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, url: String, game_dir: PathBuf) {
     let mut sessions: HashMap<String, Collection> = HashMap::new();
     let mut profiles: HashMap<String, Profile> = HashMap::new();
-    let mut recent_requests: HashMap<String, std::time::Instant> = HashMap::new();
+    let mut recent_requests: HashMap<String, (Option<String>, std::time::Instant)> = HashMap::new();
     let mut native_pending: HashMap<usize, (String, u32, u8, std::time::Instant)> = HashMap::new();
     let native_firenet = is_firenet_url(&url);
+    let mut sync_queue=push::AutoSyncQueue::default();
     let mut last_flush = std::time::Instant::now() - std::time::Duration::from_secs(60);
+    let mut last_queue_error = None;
     loop {
         let event = match rx.recv_timeout(std::time::Duration::from_secs(1)) { Ok(e)=>Some(e), Err(mpsc::RecvTimeoutError::Timeout)=>None, Err(_)=>break };
         if last_flush.elapsed() >= std::time::Duration::from_secs(1) {
-            if let Ok(settings)=push::load_settings(&game_dir) {
-                let _=push::flush_once(&game_dir,&settings,log);
+            match sync_queue.flush(&game_dir, log) {
+                Ok(()) => {
+                    if last_queue_error.take().is_some() { log("自动同步队列已恢复"); }
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    if last_queue_error.as_ref() != Some(&message) {
+                        log(&format!("自动同步队列处理失败，将重试：{message}"));
+                        last_queue_error = Some(message);
+                    }
+                }
             }
             last_flush=std::time::Instant::now();
         }
         let Some(event)=event else { continue; };
         if let Event::NativeAck { context, music, chart } = event {
-            if let Some((id, expected_music, expected_chart, _)) = native_pending.remove(&context) {
-                if native_firenet && (music, chart) == (expected_music, expected_chart) {
-                    match push::mark_native_uploaded(&game_dir, &id) {
-                        Ok(true) => log(&format!("单局 {id} 火网原生提交已确认，标记已上传")),
-                        Ok(false) => log(&format!("单局 {id} 已有上传标记")),
+            if let Some((id, expected_music, expected_chart, _)) = native_pending.get(&context) {
+                if native_firenet && (music, chart) == (*expected_music, *expected_chart) {
+                    match push::mark_native_uploaded(&game_dir, id) {
+                        Ok(marked) => {
+                            if marked { log(&format!("单局 {id} 火网原生提交已确认，标记已上传")); }
+                            else { log(&format!("单局 {id} 已有上传标记")); }
+                            native_pending.remove(&context);
+                        }
                         Err(e) => log(&format!("单局 {id} 原生确认写入失败: {e}")),
                     }
                 } else { log(&format!("单局 {id} 原生响应曲目或谱面不匹配；不标记已上传")); }
@@ -503,8 +561,14 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
             // The game retries one reg request within seconds. A two-minute
             // window can also hide a distinct short/restarted play with the
             // same score, so only coalesce the immediate transport retries.
-            if recent_requests.get(&digest).is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(5)) { continue; }
-            recent_requests.retain(|_,at| at.elapsed() < std::time::Duration::from_secs(5));
+            if let Some((native_id, at)) = recent_requests.get(&digest).filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(5)) {
+                if let (Some(id), Some((music, chart))) = (native_id, reg_identity(tree)) {
+                    // XRPC may use a new context for the transport retry.
+                    native_pending.insert(*context, (id.clone(), music, chart, *at));
+                }
+                continue;
+            }
+            recent_requests.retain(|_,(_, at)| at.elapsed() < std::time::Duration::from_secs(5));
             let settings=push::load_settings(&game_dir).unwrap_or_default();
             let official=trusted_catalog(&catalog) && push::official_chart(tree,&catalog,&catalog);
             let auto_upload=official && settings.auto_sync && !settings.access_code.is_empty();
@@ -516,11 +580,12 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
             }
             match push::persist(&game_dir,&play) {
                 Ok(_) => {
-                    recent_requests.insert(digest,std::time::Instant::now());
+                    let captured_at = std::time::Instant::now();
+                    recent_requests.insert(digest, (expect_native.then(|| play.event_id.clone()), captured_at));
                     if expect_native {
                         if let Some((music, chart)) = reg_identity(tree) {
                             native_pending.retain(|_, (_, _, _, at)| at.elapsed() < std::time::Duration::from_secs(300));
-                            native_pending.insert(*context, (play.event_id.clone(), music, chart, std::time::Instant::now()));
+                            native_pending.insert(*context, (play.event_id.clone(), music, chart, captured_at));
                         }
                     }
                     log(&format!("单局 {} 已保存；{}",play.event_id,if expect_native {"等待火网原生提交响应"} else if auto_upload {"AC 曲目，等待同步"} else if !official {"omni/删除/未知曲目，禁止上传"} else {"自动同步未开启，仅本地保存"}));
@@ -552,11 +617,20 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
 }
 unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let Some(path) = module_path(*INSTANCE.get().unwrap_or(&0)) else { return 0; };
-    let dir = layout::game_dir_from_binary(&path);
-    let _ = LOG_PATH.set(dir.join("AnyToFire.log"));
+    let working_dir = std::env::current_dir().ok();
+    let host = module_path(0);
+    let dir = layout::game_dir_for_plugin(&path, working_dir.as_deref(), host.as_deref());
+    let _ = LOG_PATH.set(layout::config_path(&dir,"AnyToFire.log"));
     log(&format!("AnyToFire {} 启动", env!("CARGO_PKG_VERSION")));
-    let catalog_path = dir.join("data/info/0/music_data.bin");
-    let catalog = match core::read_catalog(&catalog_path) { Ok(x) => x, Err(e) => { log(&format!("曲库读取失败: {e}")); return 0; } };
+    log(&format!("DLL 路径：{}，游戏目录：{}", path.display(), dir.display()));
+    let catalog_path = dir.join(layout::CATALOG_PATH);
+    let catalog = match core::read_catalog(&catalog_path) {
+        Ok(catalog) => catalog,
+        Err(error) => {
+            log(&format!("曲库读取失败：{} ({error})", catalog_path.display()));
+            return 0;
+        }
+    };
     if !matches!(catalog.version, 33 | 34) { log("不支持的曲库版本；未安装钩子"); return 0; }
     if !trusted_catalog(&catalog) { log("AC 曲库哈希与已核对基线不同；单局上传将被禁止"); }
     let _ = CATALOG_MAXIMUM.set(catalog.maximum);
@@ -661,8 +735,8 @@ mod config_tests {
         }
     }
     #[test]
-    #[ignore = "requires an offline game image and a test-only omnifix.dll"]
-    fn offline_omnifix_writer_detour_accepts_only_owned_unmodified_baseline() {
+    #[ignore = "requires an offline game image and test-only FireNet and Omnifix DLLs"]
+    fn offline_firenet_and_omnifix_detours_preserve_their_own_slots() {
         #[link(name="kernel32")]
         extern "system" {
             fn LoadLibraryExW(path:*const u16,file:*mut c_void,flags:u32)->*mut c_void;
@@ -670,34 +744,109 @@ mod config_tests {
         }
         unsafe extern "system" fn unrelated_writer(_: *mut c_void,_:*mut c_void)->bool{true}
         let game=std::env::var("ATF_TEST_GAME").expect("ATF_TEST_GAME");
-        let stub=std::env::var("ATF_TEST_OMNIFIX").expect("ATF_TEST_OMNIFIX");
+        let omni = std::env::var("ATF_TEST_OMNIFIX").expect("ATF_TEST_OMNIFIX");
+        let fire = std::env::var("ATF_TEST_FIRENET").expect("ATF_TEST_FIRENET");
         unsafe {
             let base=LoadLibraryExW(wstr(&game).as_ptr(),std::ptr::null_mut(),1) as usize;
             assert_ne!(base,0);
-            let game_build=detect_build(base,34).expect("supported 34 image");
+            let game_build = detect_build(base, 33).or_else(|| detect_build(base, 34)).expect("supported image");
             assert!(GAME_BUILD.set(game_build).is_ok());
-            let method=&game_build.reg;
-            let disk=original_file_method(base,method).unwrap();
-            assert_eq!(sha(&disk),method.sha256);
+            let callback = |path: &str| {
+                let module = LoadLibraryExW(wstr(path).as_ptr(), std::ptr::null_mut(), 1);
+                assert!(!module.is_null());
+                let address = GetProcAddress(module, b"mock_writer\0".as_ptr().cast()) as usize;
+                assert_ne!(address, 0);
+                address
+            };
+            let jump = |target: usize| {
+                let mut bytes = [0u8; 14];
+                bytes[..2].copy_from_slice(&[0xff, 0x25]);
+                bytes[6..].copy_from_slice(&(target as u64).to_le_bytes());
+                bytes
+            };
+            let reg = base + game_build.reg.rva;
+            let profile = base + game_build.profile.rva;
+            let profile_slot = base + game_build.profile.slot;
+            let mut reg_before = [0; 256];
+            let mut profile_before = [0; 256];
+            let mut reg_protection = 0;
+            let mut profile_protection = 0;
+            assert!(read(reg, &mut reg_before));
+            assert!(read(profile, &mut profile_before));
+            assert_ne!(VirtualProtect(reg as *mut c_void, 256, 0x40, &mut reg_protection), 0);
+            assert_ne!(VirtualProtect(profile as *mut c_void, 256, 0x40, &mut profile_protection), 0);
             assert!(validate_reg(base));
-            let fake=LoadLibraryExW(wstr(&stub).as_ptr(),std::ptr::null_mut(),1);
-            assert!(!fake.is_null());
-            let callback=GetProcAddress(fake,b"mock_writer\0".as_ptr().cast()) as usize;
-            assert_ne!(callback,0);
-            let entry=base+method.rva;
-            let mut original=[0u8;256];assert!(read(entry,&mut original));
-            let mut protection=0;assert_ne!(VirtualProtect(entry as *mut c_void,256,0x40,&mut protection),0);
-            let jump=|target:usize|{let mut bytes=[0u8;14];bytes[..2].copy_from_slice(&[0xff,0x25]);bytes[6..].copy_from_slice(&(target as u64).to_le_bytes());bytes};
-            assert!(write(entry,&jump(callback)));
-            assert!(validate_reg(base),"trusted writer detoured into Omnifix should coexist");
-            assert!(write(entry+64,&[original[64]^1]));
-            assert!(!validate_reg(base),"changed body must be rejected even with Omnifix loaded");
-            assert!(write(entry+64,&original[64..65]));
-            assert!(write(entry,&jump(unrelated_writer as *const () as usize)));
-            assert!(!validate_reg(base),"unrelated detour must not be whitelisted");
-            assert!(write(entry,&original));
-            let mut ignored=0;assert_ne!(VirtualProtect(entry as *mut c_void,256,protection,&mut ignored),0);
+            assert!(validate_profile(base));
+
+            let fire_callback = callback(&fire);
+            let omni_callback = callback(&omni);
+            assert!(write(reg, &jump(omni_callback)));
+            // The relative jump and its relay both fit inside the modified prologue.
+            assert!(write(profile, &[0xe9, 11, 0, 0, 0]));
+            assert!(write(profile + 16, &jump(fire_callback)));
+            assert!(validate_reg(base));
+            assert!(validate_profile(base));
+            assert_eq!(read_u64(base + game_build.reg.slot), Some(reg as u64));
+
+            assert!(replace_slot(profile_slot, profile, fire_callback));
+            assert!(!validate_profile(base), "a replaced dispatch slot is outside the inline contract");
+            assert!(replace_slot(profile_slot, fire_callback, profile));
+            assert!(write(profile + 64, &[profile_before[64] ^ 1]));
+            assert!(!validate_profile(base), "changed body must be rejected");
+            assert!(write(profile + 64, &profile_before[64..65]));
+            assert!(write(profile + 16, &jump(omni_callback)));
+            assert!(!validate_profile(base), "only the FireNet profile wrapper is supported");
+            assert!(write(reg + 64, &[reg_before[64] ^ 1]));
+            assert!(!validate_reg(base), "changed body must be rejected");
+            assert!(write(reg + 64, &reg_before[64..65]));
+            assert!(write(reg, &jump(unrelated_writer as *const () as usize)));
+            assert!(!validate_reg(base), "unrelated detour must be rejected");
+
+            assert!(write(profile + 16, &jump(fire_callback)));
+            assert!(write(reg, &jump(omni_callback)));
+            assert!(install(base));
+            assert_eq!(read_u64(profile_slot), Some(profile_hook as *const () as u64));
+            assert_eq!(read_u64(base + game_build.reg.slot), Some(reg_hook as *const () as u64));
+            assert_eq!(ORIGINAL_PROFILE.get().copied().unwrap() as usize, profile);
+            assert_eq!(ORIGINAL_REG.get().copied().unwrap() as usize, reg);
+            assert!(validate_inline_detour(base, &game_build.profile, "firenet.dll"));
+            assert!(validate_inline_detour(base, &game_build.reg, "omnifix.dll"));
+            REG_RESPONSE_ACTIVE.store(false, Ordering::Release);
+            for (method, hook) in [
+                (&game_build.rank, rank_hook as *const () as usize),
+                (&game_build.profile, profile_hook as *const () as usize),
+                (&game_build.reg, reg_hook as *const () as usize),
+                (&game_build.reg_response, reg_response_hook as *const () as usize),
+            ] {
+                assert!(replace_slot(base + method.slot, hook, base + method.rva));
+            }
+
+            assert!(write(reg, &reg_before));
+            assert!(write(profile, &profile_before));
+            let mut ignored = 0;
+            assert_ne!(VirtualProtect(reg as *mut c_void, 256, reg_protection, &mut ignored), 0);
+            assert_ne!(VirtualProtect(profile as *mut c_void, 256, profile_protection, &mut ignored), 0);
         }
+    }
+    #[test]
+    fn detour_can_resolve_a_relay_at_the_end_of_a_page() {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn VirtualAlloc(address: *mut c_void, size: usize, kind: u32, protection: u32) -> *mut c_void;
+            fn VirtualFree(address: *mut c_void, size: usize, kind: u32) -> i32;
+        }
+        let page = unsafe { VirtualAlloc(std::ptr::null_mut(), 8192, 0x2000, 0x01) };
+        assert!(!page.is_null());
+        assert_eq!(unsafe { VirtualAlloc(page, 4096, 0x1000, PAGE_READWRITE) }, page);
+        let entry = page as usize + 4096 - 14;
+        let target = detour_can_resolve_a_relay_at_the_end_of_a_page as *const () as usize;
+        let mut relay = [0; 14];
+        relay[..2].copy_from_slice(&[0xff, 0x25]);
+        relay[6..].copy_from_slice(&(target as u64).to_le_bytes());
+        assert!(write(entry, &relay));
+        assert!(!read(entry, &mut [0; 16]));
+        assert_eq!(detour_target_module(0, entry), module_name_at(target));
+        assert_ne!(unsafe { VirtualFree(page, 0, 0x8000) }, 0);
     }
     #[test] fn only_firenet_hosts_enable_native_ack() {
         assert!(is_firenet_url("https://services.firenet.iidx.pro/core/"));
@@ -709,5 +858,37 @@ mod config_tests {
         let request = serde_json::json!({"children":[{"attributes":{"mid":"34000","clid":"3"}}]});
         assert_eq!(reg_identity(&request), Some((34000, 3)));
         assert_eq!(reg_identity(&serde_json::json!({"children":[{"attributes":{"mid":"34000","clid":"12"}}]})), None);
+    }
+    #[test]
+    fn native_retry_can_confirm_the_saved_play_from_a_new_context() {
+        let dir = std::env::temp_dir().join(format!("atf-native-retry-{}", uuid::Uuid::new_v4()));
+        let catalog = Catalog {
+            version: 34,
+            maximum: 43,
+            sha256: TRUSTED_AC_CATALOG_SHA256.into(),
+            songs: [(42, core::Song {
+                title: "Fixture".into(),
+                genre: String::new(),
+                artist: String::new(),
+                levels: [1; 10],
+            })].into(),
+        };
+        let tree = serde_json::json!({"children":[{"name":"IIDX34music","attributes":{
+            "method":"reg","mid":"42","clid":"3"
+        }}]});
+        let (tx, rx) = mpsc::channel();
+        tx.send(Event::Play { context: 10, tree: tree.clone() }).unwrap();
+        tx.send(Event::Play { context: 20, tree }).unwrap();
+        tx.send(Event::NativeAck { context: 20, music: 41, chart: 3 }).unwrap();
+        tx.send(Event::NativeAck { context: 20, music: 42, chart: 3 }).unwrap();
+        drop(tx);
+        REG_RESPONSE_ACTIVE.store(true, Ordering::Release);
+        process_captures(rx, catalog, dir.join("exports"), "https://services.firenet.iidx.pro".into(), dir.clone());
+        REG_RESPONSE_ACTIVE.store(false, Ordering::Release);
+        let entries = push::list(&dir).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].1.uploaded_at.is_some());
+        assert_eq!(entries[0].1.upload_count, 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 }

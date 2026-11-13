@@ -58,13 +58,13 @@ fn matching(old:&HashMap<i32,Song>,new:&HashMap<i32,Song>)->Vec<(i32,i32,i32)>{
     out.sort();out
 }
 fn ini(game_dir:&Path)->HashMap<String,String> {
-    let mut map=HashMap::new(); let Ok(text)=fs::read_to_string(game_dir.join("IIDXScore.ini")) else{return map};
+    let mut map=HashMap::new(); let Ok(text)=fs::read_to_string(crate::layout::config_path(game_dir,"IIDXScore.ini")) else{return map};
     let mut section=false;
     for line in text.lines() { let line=line.trim(); if line.starts_with('[') {section=line.eq_ignore_ascii_case("[Score]");continue;} if !section||line.starts_with(';')||line.starts_with('#'){continue;} if let Some((k,v))=line.split_once('='){map.insert(k.trim().to_ascii_lowercase(),v.trim().to_string());} }
     map
 }
 pub fn legacy_enabled(game_dir:&Path)->bool {
-    if !game_dir.join("IIDXScore.dll").is_file() || !game_dir.join("IIDXScore.ini").is_file(){return false}
+    if !crate::layout::config_path(game_dir,"IIDXScore.dll").is_file() || !crate::layout::config_path(game_dir,"IIDXScore.ini").is_file(){return false}
     ini(game_dir).get("enabled").map_or(true,|value|value.parse::<i32>().unwrap_or(1)!=0)
 }
 fn configured_path(game_dir:&Path, name:&str)->PathBuf { let path=PathBuf::from(name);if path.is_absolute(){path}else{game_dir.join(path)} }

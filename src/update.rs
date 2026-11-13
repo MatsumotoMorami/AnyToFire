@@ -24,7 +24,7 @@ fn verify(bytes: &[u8], checksum: &[u8]) -> Result<(), String> {
 }
 /// Downloads only project release assets. The helper waits for EXE/game exit;
 /// it replaces a fixed allowlist of binaries and never copies user data.
-pub fn check_and_stage(binary: &Path) -> Result<Option<String>, String> {
+pub fn check_and_stage(binary: &Path, game_dir: &Path) -> Result<Option<String>, String> {
     let release: Release=serde_json::from_slice(&fetch(API,2_000_000)?).map_err(|e|e.to_string())?;
     if release.draft || release.prerelease || !newer(&release.tag_name,env!("CARGO_PKG_VERSION")){return Ok(None)}
     let name=format!("AnyToFire-{}.zip",release.tag_name);
@@ -34,7 +34,7 @@ pub fn check_and_stage(binary: &Path) -> Result<Option<String>, String> {
     let stage=std::env::temp_dir().join(format!("AnyToFire-update-{}",uuid::Uuid::new_v4()));fs::create_dir(&stage).map_err(|e|e.to_string())?;
     fs::write(stage.join("package.zip"),bytes).map_err(|e|e.to_string())?;
     let target=binary.parent().ok_or("无法确定安装目录")?;
-    let config=serde_json::json!({"target":target,"pid":std::process::id()});
+    let config=serde_json::json!({"target":target,"settings":crate::push::settings_path(game_dir),"pid":std::process::id()});
     fs::write(stage.join("config.json"),config.to_string()).map_err(|e|e.to_string())?;
     let script=stage.join("install.ps1");let mut f=fs::File::create(&script).map_err(|e|e.to_string())?;
     f.write_all(include_bytes!("update.ps1")).map_err(|e|e.to_string())?;

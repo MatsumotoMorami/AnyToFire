@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[path = "push_queue.rs"]
+mod queue;
+pub use queue::AutoSyncQueue;
+
 pub const ENDPOINT: &str = "https://services.firenet.iidx.pro/api/iidx/plugin/music-reg";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -58,7 +62,7 @@ struct Submission<'a> {
     request: &'a Value,
 }
 
-pub fn settings_path(dir: &Path) -> PathBuf { dir.join("AnyToFire_sync.json") }
+pub fn settings_path(dir: &Path) -> PathBuf { crate::layout::config_path(dir,"AnyToFire_sync.json") }
 pub fn queue_path(dir: &Path) -> PathBuf { dir.join("AnyToFire_recent") }
 pub fn recipient_key(code: &str) -> String { format!("{:x}", Sha256::digest(code.as_bytes())) }
 pub fn official_chart(request: &Value, official: &core::Catalog, played: &core::Catalog) -> bool {
@@ -98,20 +102,32 @@ pub fn list(dir: &Path) -> io::Result<Vec<(PathBuf, PlayEvent)>> {
     if !queue.exists() { return Ok(Vec::new()); }
     let mut result = Vec::new();
     for entry in fs::read_dir(queue)? {
-        let path = entry?.path();
+        let entry = entry?;
+        let path = entry.path();
         if path.extension().is_some_and(|x| x == "json") {
-            if let Ok(event) = serde_json::from_slice::<PlayEvent>(&fs::read(&path)?) { result.push((path, event)); }
+            if !entry.file_type()?.is_file() { continue; }
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if let Ok(event) = serde_json::from_slice::<PlayEvent>(&bytes) { result.push((path, event)); }
         }
     }
     result.sort_by(|a, b| a.1.occurred_at.cmp(&b.1.occurred_at));
     Ok(result)
 }
 fn retry_after(response: &ureq::Response) -> Option<Duration> {
-    let value=response.header("Retry-After")?;
+    parse_retry_after(response.header("Retry-After")?, chrono::Utc::now().timestamp())
+}
+fn parse_retry_after(value: &str, now: i64) -> Option<Duration> {
     if let Ok(seconds)=value.parse::<u64>() { return Some(Duration::from_secs(seconds)); }
     let date=chrono::DateTime::parse_from_rfc2822(value).ok()?;
-    let remaining=date.timestamp().saturating_sub(chrono::Utc::now().timestamp());
+    let remaining=date.timestamp().saturating_sub(now).max(0);
     Some(Duration::from_secs(remaining as u64))
+}
+fn unix_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().try_into().unwrap_or(u64::MAX)
 }
 pub struct UploadError { pub message: String, pub retry: bool, pub retry_after: Option<Duration> }
 fn permanent(message: impl Into<String>) -> UploadError { UploadError { message: message.into(), retry: false, retry_after: None } }
@@ -169,7 +185,7 @@ pub fn submit(event: &PlayEvent, code: &str) -> Result<u16, UploadError> {
             let wait = retry_after(&response);
             let reply: Option<Value> = response.into_json().ok();
             let message = api_error_message(status, reply.as_ref());
-            if status == 429 || status >= 500 { Err(temporary(message, wait)) }
+            if matches!(status, 408 | 429) || status >= 500 { Err(temporary(message, wait)) }
             else { Err(permanent(message)) }
         }
         Err(error) => Err(temporary(format!("网络错误: {error}"),None)),
@@ -198,13 +214,17 @@ pub fn mark_native_uploaded(dir: &Path, event_id: &str) -> io::Result<bool> {
 
 pub fn flush_once(dir: &Path, settings: &SyncSettings, on_result: impl Fn(&str)) -> io::Result<()> {
     if !settings.auto_sync || settings.access_code.is_empty() { return Ok(()); }
+    let mut events=list(dir)?;
+    flush_events(&mut events,settings,on_result)
+}
+pub(super) fn flush_events(events: &mut [(PathBuf,PlayEvent)], settings: &SyncSettings, on_result: impl Fn(&str)) -> io::Result<()> {
+    if !settings.auto_sync || settings.access_code.is_empty() { return Ok(()); }
     let key = recipient_key(&settings.access_code);
-    let now=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
-    for (path, mut event) in list(dir)? {
-        if event.recipient_key != key || !event.upload_allowed || event.uploaded_at.is_some() || event.blocked_reason.is_some() || event.next_attempt_ms > now { continue; }
+    for (path, event) in events {
+        if event.recipient_key != key || !event.upload_allowed || event.uploaded_at.is_some() || event.blocked_reason.is_some() || event.next_attempt_ms > unix_ms() { continue; }
         match submit(&event, &settings.access_code) {
             Ok(status) => {
-                mark_uploaded(&mut event);
+                mark_uploaded(event);
                 core::atomic_write(&path, &serde_json::to_vec(&event)?)?;
                 on_result(&format!("单局 {} 已上传 ({status})", event.event_id));
             }
@@ -214,7 +234,8 @@ pub fn flush_once(dir: &Path, settings: &SyncSettings, on_result: impl Fn(&str))
                     let exponential=1u64.checked_shl(event.attempts.saturating_sub(1).min(6)).unwrap_or(60).min(60);
                     let jitter=(u64::from_le_bytes(Sha256::digest(format!("{}:{}",event.event_id,event.attempts).as_bytes())[..8].try_into().unwrap()) % 1000) as u64;
                     let delay=error.retry_after.unwrap_or(Duration::from_secs(exponential));
-                    event.next_attempt_ms=now.saturating_add(delay.as_millis() as u64).saturating_add(jitter);
+                    let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                    event.next_attempt_ms = unix_ms().saturating_add(delay_ms).saturating_add(jitter);
                     on_result(&format!("单局 {} 待重试: {}",event.event_id,error.message));
                 } else {
                     event.blocked_reason=Some(error.message.clone());
@@ -312,6 +333,14 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
 }
 
 #[cfg(test)] mod tests {
+    #[test]
+    fn retry_after_date_in_the_past_allows_retry() {
+        let date = "Sun, 06 Nov 1994 08:49:37 GMT";
+        let timestamp = chrono::DateTime::parse_from_rfc2822(date).unwrap().timestamp();
+        assert_eq!(super::parse_retry_after(date, timestamp + 3), Some(super::Duration::ZERO));
+        assert_eq!(super::parse_retry_after(date, timestamp - 5), Some(super::Duration::from_secs(5)));
+        assert_eq!(super::parse_retry_after("15", timestamp), Some(super::Duration::from_secs(15)));
+    }
     #[test]
     fn omni_local_only_defaults_on_for_existing_settings() {
         let settings: super::SyncSettings = serde_json::from_str(r#"{"autoSync":true,"omniOverlay":false}"#).unwrap();

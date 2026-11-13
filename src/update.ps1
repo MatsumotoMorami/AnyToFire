@@ -9,8 +9,7 @@ try {
         if ((Get-Date) -gt $deadline) { throw 'Update timed out while waiting for game/app exit' }
         Start-Sleep -Seconds 3
     }
-    $game = if ((Split-Path $target -Leaf) -ieq 'AnyToFire') { Split-Path $target -Parent } else { $target }
-    $settings = Join-Path $game 'AnyToFire_sync.json'
+    $settings = [IO.Path]::GetFullPath($config.settings)
     if (Test-Path -LiteralPath $settings) {
         $saved = Get-Content -LiteralPath $settings -Raw | ConvertFrom-Json
         if ($saved.autoUpdate -eq $false) { return }
@@ -21,8 +20,9 @@ try {
     $entries = @{}
     try {
         foreach ($entry in $zip.Entries) {
-            if ($entry.FullName.EndsWith('/')) { continue }
-            if ($entry.FullName -notmatch '^AnyToFire/(AnyToFire\.exe|AnyToFire\.dll|WebView2Loader\.dll)$') { throw 'Unexpected update archive entry' }
+            $entryPath = $entry.FullName.Replace('\','/')
+            if ($entryPath -eq 'AnyToFire/') { continue }
+            if ($entryPath -notmatch '^AnyToFire/(AnyToFire\.exe|AnyToFire\.dll|WebView2Loader\.dll)$') { throw 'Unexpected update archive entry' }
             if ($entries.ContainsKey($entry.Name) -or $entry.Length -gt 100MB) { throw 'Invalid update archive entry' }
             $entries[$entry.Name] = $entry
         }
@@ -34,7 +34,7 @@ try {
             try { if ($stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw 'Invalid PE binary' } } finally { $stream.Dispose() }
         }
     } finally { $zip.Dispose() }
-    $backup = Join-Path $target ('update-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $backup = Join-Path $target ('update-backup-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $backup | Out-Null
     foreach ($name in $allowed) { if (Test-Path -LiteralPath (Join-Path $target $name)) { Copy-Item -LiteralPath (Join-Path $target $name) -Destination (Join-Path $backup $name) } }
     foreach ($name in $allowed) {
@@ -47,9 +47,19 @@ try {
     'Update installed. Previous binaries: ' + $backup | Set-Content -LiteralPath (Join-Path $target 'update.log')
 } catch {
     $failure = $_.Exception.Message
+    $restoreErrors = @()
     foreach ($name in $changed) {
-        try { Copy-Item -LiteralPath (Join-Path $backup $name) -Destination (Join-Path $target $name) -Force } catch {}
+        try {
+            $previous = Join-Path $backup $name
+            $destination = Join-Path $target $name
+            if (Test-Path -LiteralPath $previous -PathType Leaf) {
+                Copy-Item -LiteralPath $previous -Destination $destination -Force
+            } elseif (Test-Path -LiteralPath $destination -PathType Leaf) {
+                Remove-Item -LiteralPath $destination -Force
+            }
+        } catch { $restoreErrors += "$name ($($_.Exception.Message))" }
     }
+    if ($restoreErrors.Count) { $failure += '. Rollback incomplete: ' + ($restoreErrors -join ', ') }
     ('Update failed: ' + $failure) | Set-Content -LiteralPath (Join-Path $stage 'update-error.log')
     if ($target) { ('Update failed: ' + $failure) | Set-Content -LiteralPath (Join-Path $target 'update.log') }
 }

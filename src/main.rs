@@ -41,10 +41,8 @@ extern "system" {
 extern "system" { fn MessageBoxW(hwnd: Hwnd, text: *const u16, title: *const u16, flags: u32) -> i32; }
 
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
-const PLUGIN_DLL: &str = r"AnyToFire\AnyToFire.dll";
-const LEGACY_PLUGIN_DLL: &str = "AnyToFire.dll";
 fn is_plugin_hook(name: &str) -> bool {
-    name.eq_ignore_ascii_case(PLUGIN_DLL) || name.eq_ignore_ascii_case(LEGACY_PLUGIN_DLL)
+    name.rsplit(['\\', '/']).next().is_some_and(|leaf|leaf.eq_ignore_ascii_case(layout::PLUGIN_DLL))
 }
 fn is_spice_launch_line(line: &str) -> bool {
     let line = line.trim_start().to_ascii_lowercase();
@@ -59,7 +57,7 @@ impl HookSource {
         match value { "cfg" => Ok(Self::Cfg), "bat" => Ok(Self::Bat), _ => Err("请选择 cfg 配置或 start.bat 启动".into()) }
     }
 }
-fn source_path(game_dir: &Path) -> PathBuf { game_dir.join("AnyToFire_launch.json") }
+fn source_path(game_dir: &Path) -> PathBuf { anytofire::layout::config_path(game_dir,"AnyToFire_launch.json") }
 fn load_source(game_dir: &Path) -> Result<Option<HookSource>, String> {
     let path = source_path(game_dir);
     if !path.exists() { return Ok(None); }
@@ -71,8 +69,15 @@ fn save_source(game_dir: &Path, source: HookSource) -> Result<(), String> {
 }
 fn hook_line_range(line: &str) -> Option<(usize, usize)> {
     if !is_spice_launch_line(line) { return None; }
+    quoted_hook_range(line)
+}
+fn quoted_hook_range(line: &str) -> Option<(usize, usize)> {
     let marker = "-k \"";
-    let begin = line.find(marker)? + marker.len();
+    let lower = line.to_ascii_lowercase();
+    let (start, _) = lower.match_indices(marker).find(|(index, _)| {
+        *index == 0 || line.as_bytes()[index - 1].is_ascii_whitespace()
+    })?;
+    let begin = start + marker.len();
     let end = begin + line[begin..].find('"')?;
     Some((begin, end))
 }
@@ -98,9 +103,21 @@ fn ensure_xml_hook(mut xml: String) -> Result<(String, (usize, usize)), String> 
     Ok((xml, range))
 }
 fn batch_hook_range(batch: &str) -> Option<(usize, usize)> {
+    let batch_lower = batch.to_ascii_lowercase();
     batch.split_inclusive('\n').scan(0usize, |offset, line| {
         let current = *offset; *offset += line.len(); Some((current, line))
-    }).find_map(|(offset, line)| hook_line_range(line).map(|(begin,end)| (offset+begin,offset+end)))
+    }).find_map(|(offset, line)| {
+        let direct = hook_line_range(line);
+        let range = direct.or_else(|| {
+            let assignment = line.trim_start().to_ascii_lowercase();
+            let (name, _) = assignment.strip_prefix("set \"")?.split_once('=')?;
+            if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') { return None; }
+            let reference = format!("%{name}%");
+            batch_lower.lines().any(|line| is_spice_launch_line(line) && line.contains(&reference))
+                .then(|| quoted_hook_range(line)).flatten()
+        })?;
+        Some((offset + range.0, offset + range.1))
+    })
 }
 fn ensure_batch_hook(mut batch: String) -> Result<(String, (usize, usize)), String> {
     if let Some(range) = batch_hook_range(&batch) { return Ok((batch, range)); }
@@ -110,15 +127,16 @@ fn ensure_batch_hook(mut batch: String) -> Result<(String, (usize, usize)), Stri
       .ok_or("start.bat 中找不到 spice64.exe 启动行")?;
     let end = start + batch[start..].find('\n').unwrap_or(batch.len()-start);
     let at = batch[start..end].find("%*").map(|x| start+x).unwrap_or_else(|| if end>start && batch.as_bytes()[end-1]==b'\r' { end-1 } else { end });
-    batch.insert_str(at, "-k \"\" ");
+    let separator = if at > start && !batch.as_bytes()[at - 1].is_ascii_whitespace() { " " } else { "" };
+    batch.insert_str(at, &format!("{separator}-k \"\" "));
     let range = batch_hook_range(&batch).ok_or("无法添加 start.bat 的 -k 参数")?;
     Ok((batch, range))
 }
-fn update_hook_list(content: &str, range: (usize, usize), enabled: bool, remove_legacy: bool) -> String {
+fn update_hook_list<'a>(content: &'a str, range: (usize, usize), hook: Option<&'a str>, remove_legacy: bool) -> String {
     let (begin, end) = range;
     let mut hooks: Vec<&str> = content[begin..end].split_whitespace()
-        .filter(|name| !is_plugin_hook(name) && (!remove_legacy || !name.eq_ignore_ascii_case("IIDXScore.dll"))).collect();
-    if enabled { hooks.push(PLUGIN_DLL); }
+        .filter(|name| !is_plugin_hook(name) && (!remove_legacy || !name.replace('\\',"/").rsplit('/').next().is_some_and(|leaf|leaf.eq_ignore_ascii_case("IIDXScore.dll")))).collect();
+    hooks.extend(hook);
     format!("{}{}{}", &content[..begin], hooks.join(" "), &content[end..])
 }
 fn plugin_enabled(game_dir: &Path) -> Result<bool, String> {
@@ -130,43 +148,49 @@ fn plugin_enabled(game_dir: &Path) -> Result<bool, String> {
     let range = match source { HookSource::Cfg => xml_hook_range(&content), HookSource::Bat => batch_hook_range(&content) };
     Ok(range.is_some_and(|(begin,end)| content[begin..end].split_whitespace().any(is_plugin_hook)))
 }
-fn migrate_legacy_hook(game_dir: &Path) -> Result<(), String> {
-    let candidates = [spice_config_path().ok().map(|path| (HookSource::Cfg, path)), Some((HookSource::Bat, game_dir.join("start.bat")))];
-    for (source, path) in candidates.into_iter().flatten() {
-        if !path.is_file() { continue; }
-        let content = fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}", path.display()))?;
-        let range = match source { HookSource::Cfg => xml_hook_range(&content), HookSource::Bat => batch_hook_range(&content) };
-        let Some((begin,end)) = range else { continue; };
-        if !content[begin..end].split_whitespace().any(|name| name.eq_ignore_ascii_case(LEGACY_PLUGIN_DLL)) { continue; }
-        let updated = update_hook_list(&content, (begin,end), true, false);
-        let backup = match source { HookSource::Cfg => path.with_extension("xml.AnyToFire.bak"), HookSource::Bat => game_dir.join("start.bat.AnyToFire.bak") };
-        fs::copy(&path, backup).map_err(|e| format!("备份启动配置失败: {e}"))?;
-        fs::write(&path, updated).map_err(|e| format!("迁移 AnyToFire 注入路径失败: {e}"))?;
-    }
-    Ok(())
+fn migrate_plugin_hook(game_dir: &Path, binary: &Path) -> Result<(), String> {
+    let source = match load_source(game_dir)? {
+        Some(source) => source,
+        None if initialization_marker(game_dir).is_file() => HookSource::Cfg,
+        None => return Ok(()),
+    };
+    let path = match source { HookSource::Cfg => spice_config_path()?, HookSource::Bat => game_dir.join("start.bat") };
+    if !path.is_file() { return Ok(()); }
+    let original = fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}", path.display()))?;
+    let range = match source { HookSource::Cfg => xml_hook_range(&original), HookSource::Bat => batch_hook_range(&original) };
+    let Some((begin, end)) = range else { return Ok(()); };
+    let mut existing = original[begin..end].split_whitespace().filter(|name| is_plugin_hook(name));
+    let Some(previous) = existing.next() else { return Ok(()); };
+    let hook = layout::plugin_hook_path(game_dir, binary)?;
+    if previous.eq_ignore_ascii_case(&hook) && existing.next().is_none() { return Ok(()); }
+    let updated = update_hook_list(&original, (begin, end), Some(&hook), false);
+    write_hook_config(&path, source, &original, &updated)
 }
-fn set_plugin_enabled(game_dir: &Path, enabled: bool) -> Result<(), String> {
-    set_plugin_hooks(game_dir, enabled, false)
+fn write_hook_config(path: &Path, source: HookSource, original: &str, updated: &str) -> Result<(), String> {
+    if updated == original { return Ok(()); }
+    let backup = match source {
+        HookSource::Cfg => path.with_extension("xml.AnyToFire.bak"),
+        HookSource::Bat => path.with_file_name("start.bat.AnyToFire.bak"),
+    };
+    fs::copy(path, backup).map_err(|e| format!("备份启动配置失败: {e}"))?;
+    core::atomic_write(path, updated.as_bytes()).map_err(|e| format!("更新启动配置失败: {e}"))
 }
-fn set_plugin_hooks(game_dir: &Path, enabled: bool, remove_legacy: bool) -> Result<(), String> {
+fn set_plugin_hooks(game_dir: &Path, binary: &Path, enabled: bool, remove_legacy: bool) -> Result<(), String> {
     let source = match load_source(game_dir)? { Some(source)=>source, None if initialization_marker(game_dir).is_file()=>HookSource::Cfg, None=>return Err("请先选择启动配置来源".into()) };
     let path = match source { HookSource::Cfg => spice_config_path()?, HookSource::Bat => game_dir.join("start.bat") };
     let original = fs::read_to_string(&path).map_err(|e| format!("无法读取 {}: {e}",path.display()))?;
     let (content, range) = match source { HookSource::Cfg => ensure_xml_hook(original.clone())?, HookSource::Bat => ensure_batch_hook(original.clone())? };
-    let updated = update_hook_list(&content, range, enabled, remove_legacy);
-    if updated != original {
-        let backup = match source { HookSource::Cfg => path.with_extension("xml.AnyToFire.bak"), HookSource::Bat => game_dir.join("start.bat.AnyToFire.bak") };
-        fs::copy(&path,backup).map_err(|e| format!("备份启动配置失败: {e}"))?;
-        fs::write(&path,updated).map_err(|e| format!("更新启动配置失败: {e}"))?;
-    }
-    Ok(())
+    let hook = enabled.then(|| layout::plugin_hook_path(game_dir, binary)).transpose()?;
+    let updated = update_hook_list(&content, range, hook.as_deref(), remove_legacy);
+    write_hook_config(&path, source, &original, &updated)
 }
-fn initialization_marker(game_dir: &Path) -> PathBuf { game_dir.join("AnyToFire_initialized.json") }
+fn initialization_marker(game_dir: &Path) -> PathBuf { anytofire::layout::config_path(game_dir,"AnyToFire_initialized.json") }
 fn game_version(game_dir: &Path) -> Result<u32, String> {
-    core::read_catalog(&game_dir.join("data/info/0/music_data.bin"))
-        .map(|catalog| catalog.version).map_err(|e| format!("无法识别游戏曲库版本: {e}"))
+    let catalog_path = game_dir.join(layout::CATALOG_PATH);
+    core::read_catalog(&catalog_path)
+        .map(|catalog| catalog.version).map_err(|e| format!("无法读取游戏曲库 {} ({e})", catalog_path.display()))
 }
-fn score_ini_path(game_dir: &Path) -> PathBuf { game_dir.join("IIDXScore.ini") }
+fn score_ini_path(game_dir: &Path) -> PathBuf { anytofire::layout::config_path(game_dir,"IIDXScore.ini") }
 fn score_ini_value(game_dir: &Path, key: &str) -> Option<String> {
     let content = fs::read_to_string(score_ini_path(game_dir)).ok()?;
     let mut score_section = false;
@@ -256,20 +280,21 @@ fn migrate_score(game_dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod hook_tests {
     use super::*;
+    const PACKAGE_HOOK: Option<&str> = Some(r"AnyToFire\AnyToFire.dll");
     #[test]
     fn xml_hook_list_changes_only_iidx() {
         let xml = "<games><game name=\"Beatmania IIDX\"><options><option name=\"k\" value=\"ifs_hook.dll IIDXRecorder.dll\"/></options></game><game name=\"Other\"><option name=\"k\" value=\"Other.dll\"/></game></games>";
-        let enabled = update_hook_list(xml, xml_hook_range(xml).unwrap(), true, false);
+        let enabled = update_hook_list(xml, xml_hook_range(xml).unwrap(), PACKAGE_HOOK, false);
         assert!(enabled.contains("value=\"ifs_hook.dll IIDXRecorder.dll AnyToFire\\AnyToFire.dll\""));
         assert!(enabled.contains("value=\"Other.dll\""));
-        let disabled = update_hook_list(&enabled, xml_hook_range(&enabled).unwrap(), false, false);
+        let disabled = update_hook_list(&enabled, xml_hook_range(&enabled).unwrap(), None, false);
         assert_eq!(disabled, xml);
     }
     #[test]
     fn missing_iidx_k_is_added_without_changing_other_game() {
         let xml = "<games><game name=\"Beatmania IIDX\"><options><option name=\"url\" value=\"https://example/core/\"/></options></game><game name=\"Other\"><options><option name=\"k\" value=\"Other.dll\"/></options></game></games>";
         let (xml, range) = ensure_xml_hook(xml.to_owned()).unwrap();
-        let updated = update_hook_list(&xml, range, true, false);
+        let updated = update_hook_list(&xml, range, PACKAGE_HOOK, false);
         assert!(updated.contains("<option name=\"k\" value=\"AnyToFire\\AnyToFire.dll\"/>"));
         assert!(updated.contains("value=\"Other.dll\""));
     }
@@ -277,26 +302,67 @@ mod hook_tests {
     fn missing_batch_k_is_added_to_launch_command() {
         let batch = "@echo off\r\n\".\\spice64.exe\" -cfgpath \"config.xml\" %*\r\n";
         let (batch, range) = ensure_batch_hook(batch.to_owned()).unwrap();
-        let updated = update_hook_list(&batch, range, true, false);
+        let updated = update_hook_list(&batch, range, PACKAGE_HOOK, false);
         assert!(updated.contains("-cfgpath \"config.xml\" -k \"AnyToFire\\AnyToFire.dll\" %*"));
+    }
+    #[test]
+    fn batch_hook_in_a_forwarded_argument_variable_is_updated_in_place() {
+        let batch = "set \"UNUSED=-k \"leave.dll\"\"\r\nset \"IIDX_LAUNCH_ARGS=-cfgpath \"run.xml\" -k \"firenet.dll AnyToFire.dll\"\"\r\n\".\\spice64.exe\" %IIDX_LAUNCH_ARGS% %*\r\n";
+        let (content, range) = ensure_batch_hook(batch.into()).unwrap();
+        let updated = update_hook_list(&content, range, PACKAGE_HOOK, false);
+        assert_eq!(updated, batch.replace("firenet.dll AnyToFire.dll", r"firenet.dll AnyToFire\AnyToFire.dll"));
+        assert_eq!(updated.matches("-k ").count(), 2);
+    }
+    #[test]
+    fn batch_without_trailing_arguments_gets_space_before_hook_flag() {
+        let (batch, range) = ensure_batch_hook("\".\\spice64.exe\"\r\n".into()).unwrap();
+        let updated = update_hook_list(&batch, range, PACKAGE_HOOK, false);
+        assert!(updated.starts_with("\".\\spice64.exe\" -k "));
     }
     #[test]
     fn batch_hook_list_preserves_other_arguments() {
         let line = "\".\\spice64.exe\" -cfgpath \"config.xml\" -k \"ifs_hook.dll IIDXRecorder.dll\" %*";
-        let updated = update_hook_list(line, hook_line_range(line).unwrap(), true, false);
+        let updated = update_hook_list(line, hook_line_range(line).unwrap(), PACKAGE_HOOK, false);
         assert_eq!(updated, "\".\\spice64.exe\" -cfgpath \"config.xml\" -k \"ifs_hook.dll IIDXRecorder.dll AnyToFire\\AnyToFire.dll\" %*");
     }
     #[test]
     fn initialization_replaces_legacy_hook_without_touching_others() {
         let line = "\".\\spice64.exe\" -k \"ifs_hook.dll IIDXScore.dll IIDXRecorder.dll\" %*";
-        let updated = update_hook_list(line, hook_line_range(line).unwrap(), true, true);
+        let updated = update_hook_list(line, hook_line_range(line).unwrap(), PACKAGE_HOOK, true);
         assert_eq!(updated, "\".\\spice64.exe\" -k \"ifs_hook.dll IIDXRecorder.dll AnyToFire\\AnyToFire.dll\" %*");
     }
     #[test]
     fn existing_root_hook_is_replaced_without_duplicate_injection() {
         let line = "\".\\spice64.exe\" -k \"ifs_hook.dll AnyToFire.dll IIDXRecorder.dll\" %*";
-        let updated = update_hook_list(line, hook_line_range(line).unwrap(), true, false);
+        let updated = update_hook_list(line, hook_line_range(line).unwrap(), PACKAGE_HOOK, false);
         assert_eq!(updated, "\".\\spice64.exe\" -k \"ifs_hook.dll IIDXRecorder.dll AnyToFire\\AnyToFire.dll\" %*");
+    }
+    #[test]
+    fn batch_migration_tracks_root_and_custom_install_locations() {
+        let game = std::env::temp_dir().join(format!("atf-hook-layout-{}", uuid::Uuid::new_v4()));
+        let custom = game.join("modules/tools/scores");
+        fs::create_dir_all(&custom).unwrap();
+        let batch = game.join("start.bat");
+        let initial = "\".\\spice64.exe\" -k \"firenet.dll AnyToFire.dll omnifix.dll AnyToFire\\AnyToFire.dll\" %*\r\n";
+        fs::write(&batch, initial).unwrap();
+        fs::write(custom.join(layout::PLUGIN_DLL), b"fixture").unwrap();
+        fs::write(game.join(layout::PLUGIN_DLL), b"fixture").unwrap();
+        save_source(&game, HookSource::Bat).unwrap();
+
+        let custom_exe = custom.join("AnyToFire.exe");
+        migrate_plugin_hook(&game, &custom_exe).unwrap();
+        let nested = fs::read_to_string(&batch).unwrap();
+        assert!(nested.contains(r#"-k "firenet.dll omnifix.dll modules\tools\scores\AnyToFire.dll""#));
+        assert_eq!(fs::read_to_string(game.join("start.bat.AnyToFire.bak")).unwrap(), initial);
+        migrate_plugin_hook(&game, &custom_exe).unwrap();
+        assert_eq!(fs::read_to_string(game.join("start.bat.AnyToFire.bak")).unwrap(), initial);
+
+        let root_exe = game.join("AnyToFire.exe");
+        migrate_plugin_hook(&game, &root_exe).unwrap();
+        assert!(fs::read_to_string(&batch).unwrap().contains(r#"-k "firenet.dll omnifix.dll AnyToFire.dll""#));
+        set_plugin_hooks(&game, &root_exe, false, false).unwrap();
+        assert!(fs::read_to_string(&batch).unwrap().contains(r#"-k "firenet.dll omnifix.dll""#));
+        fs::remove_dir_all(game).unwrap();
     }
     #[test]
     fn score_ini_keeps_database_and_server_settings() {
@@ -379,7 +445,7 @@ fn file_path(suggested: &str, ext: &str, open: bool) -> Option<PathBuf> {
 #[derive(Debug)]
 enum Event { Command(Value), Update(Result<Option<String>, String>) }
 
-struct App { root: PathBuf, game_dir: PathBuf, window: Option<Window>, webview: Option<WebView>, proxy: EventLoopProxy<Event> }
+struct App { root: PathBuf, game_dir: PathBuf, binary: PathBuf, window: Option<Window>, webview: Option<WebView>, proxy: EventLoopProxy<Event> }
 impl App {
     fn send(&self, value: Value) {
         if let Some(webview) = &self.webview {
@@ -419,13 +485,18 @@ impl App {
         if !push::load_settings(self.game_dir()).map(|s|s.auto_update).unwrap_or(false) {return}
         if STARTED.swap(true,std::sync::atomic::Ordering::AcqRel){return}
         let proxy=self.proxy.clone();
-        std::thread::spawn(move || { let result=std::env::current_exe().map_err(|e|e.to_string()).and_then(|p|anytofire::update::check_and_stage(&p));let _=proxy.send_event(Event::Update(result)); });
+        let binary = self.binary.clone();
+        let game_dir = self.game_dir.clone();
+        std::thread::spawn(move || {
+            let result = anytofire::update::check_and_stage(&binary, &game_dir);
+            let _ = proxy.send_event(Event::Update(result));
+        });
     }
     fn notify(&self, message: &str) { self.send(json!({"type":"toast","message":message})); }
     fn command(&self, request: Value) -> Result<(), String> {
         match request["action"].as_str().unwrap_or("") {
             "ready" => {
-                migrate_legacy_hook(self.game_dir())?;
+                migrate_plugin_hook(self.game_dir(), &self.binary)?;
                 self.refresh()?; self.send_settings()?;
                 self.check_update();
                 let has_access_code = !push::load_settings(self.game_dir()).map_err(|e| e.to_string())?.access_code.is_empty();
@@ -448,7 +519,7 @@ impl App {
             }
             "init_inject" => {
                 if !matches!(game_version(self.game_dir())?, 33 | 34) { return Err("当前游戏版本不受支持，未改动注入配置".into()); }
-                set_plugin_hooks(self.game_dir(), true, true)?;
+                set_plugin_hooks(self.game_dir(), &self.binary, true, true)?;
                 fs::write(initialization_marker(self.game_dir()), json!({"version":game_version(self.game_dir())?,"completedAt":core::now()}).to_string())
                     .map_err(|e| format!("保存初始化状态失败: {e}"))?;
                 self.send_settings()?;
@@ -482,7 +553,7 @@ impl App {
             }
             "set_plugin_enabled" => {
                 let enabled=request["enabled"].as_bool().ok_or("缺少插件开关状态")?;
-                set_plugin_enabled(self.game_dir(),enabled)?;
+                set_plugin_hooks(self.game_dir(), &self.binary, enabled, false)?;
                 self.send_hook_state()?;
                 self.notify(if enabled { "已启用插件，下次启动游戏时生效" } else { "已停用插件，下次启动游戏时生效" }); Ok(())
             }
@@ -641,6 +712,6 @@ fn main() {
     let game_dir = supplied_root.as_ref().and_then(|root| root.parent().map(Path::to_path_buf)).unwrap_or(default_game_dir);
     let root = supplied_root.unwrap_or_else(|| game_dir.join("AnyToFire_exports"));
     let event_loop = EventLoop::<Event>::with_user_event().build().expect("事件循环启动失败");
-    let mut app = App { root, game_dir, window: None, webview: None, proxy: event_loop.create_proxy() };
+    let mut app = App { root, game_dir, binary, window: None, webview: None, proxy: event_loop.create_proxy() };
     event_loop.run_app(&mut app).expect("窗口运行失败");
 }

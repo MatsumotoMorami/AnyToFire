@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -201,8 +201,14 @@ pub fn write_collection(root: &Path, collection: &Collection) -> io::Result<Path
     Ok(dir)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    fs::write(&tmp, bytes)?;
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let written = file.write_all(bytes);
+    drop(file);
+    if let Err(error) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
     #[cfg(windows)] {
         use std::os::windows::ffi::OsStrExt;
         #[link(name = "kernel32")]
@@ -216,7 +222,11 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
             return Err(error);
         }
     }
-    #[cfg(not(windows))] fs::rename(&tmp, path)?;
+    #[cfg(not(windows))]
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
     Ok(())
 }
 pub fn load_collections(root: &Path) -> io::Result<Vec<Collection>> {
