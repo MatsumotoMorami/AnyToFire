@@ -472,7 +472,7 @@ impl App {
     fn game_dir(&self) -> &Path { &self.game_dir }
     fn send_settings(&self) -> Result<(), String> {
         let settings=push::load_settings(self.game_dir()).map_err(|e| e.to_string())?;
-        self.send(json!({"type":"settings","autoSync":settings.auto_sync,"hasAccessCode":!settings.access_code.is_empty(),"omniOverlay":settings.omni_overlay,"omniLocalOnly":settings.omni_local_only,"autoMerge":settings.auto_merge,"autoUpdate":settings.auto_update,"pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
+        self.send(json!({"type":"settings","autoSync":settings.auto_sync_enabled(),"hasAccessCode":settings.has_access_code(),"omniOverlay":settings.omni_overlay,"omniLocalOnly":settings.omni_local_only,"autoMerge":settings.auto_merge,"autoUpdate":settings.auto_update,"pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
     }
     fn send_hook_state(&self) -> Result<(), String> {
         self.send(json!({"type":"hook_state","pluginEnabled":plugin_enabled(self.game_dir())?,"hookSource":load_source(self.game_dir())?.unwrap_or(HookSource::Cfg).as_str()})); Ok(())
@@ -499,11 +499,10 @@ impl App {
                 migrate_plugin_hook(self.game_dir(), &self.binary)?;
                 self.refresh()?; self.send_settings()?;
                 self.check_update();
-                let has_access_code = !push::load_settings(self.game_dir()).map_err(|e| e.to_string())?.access_code.is_empty();
                 let needs_initialization = !initialization_marker(self.game_dir()).is_file()
                     || !self.game_dir().join("AnyToFire_data/music_omni_33_final.bin").is_file()
                     || !self.game_dir().join("AnyToFire_data/music_omni_34_0a.bin").is_file();
-                self.send(json!({"type":"initialization","needed":needs_initialization,"hasAccessCode":has_access_code,"version":game_version(self.game_dir())?}));
+                self.send(json!({"type":"initialization","needed":needs_initialization,"version":game_version(self.game_dir())?}));
                 Ok(())
             },
             "refresh" => { self.refresh()?; self.send_settings() },
@@ -533,8 +532,9 @@ impl App {
                 if let Some(enabled)=request["omniLocalOnly"].as_bool() { settings.omni_local_only=enabled; }
                 if let Some(enabled)=request["autoMerge"].as_bool() { settings.auto_merge=enabled; }
                 if let Some(enabled)=request["autoUpdate"].as_bool() { settings.auto_update=enabled; }
-                if settings.auto_sync && settings.access_code.is_empty() { return Err("请先填写火网第三方访问码".into()); }
+                settings.auto_sync = settings.auto_sync_enabled();
                 push::save_settings(self.game_dir(),&settings).map_err(|e| e.to_string())?;
+                self.send(json!({"type":"settings_saved"}));
                 self.refresh()?; self.check_update(); self.send_settings()?; self.notify("设置已保存；Omnifix 显示与本地存分开关在下次启动游戏时生效"); Ok(())
             }
             "set_hook_source" => {

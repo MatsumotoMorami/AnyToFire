@@ -25,6 +25,11 @@ pub struct SyncSettings {
     #[serde(default)] pub auto_merge: bool,
     #[serde(default = "default_true")] pub auto_update: bool,
 }
+impl SyncSettings {
+    pub fn has_access_code(&self) -> bool { !self.access_code.trim().is_empty() }
+    pub fn auto_sync_enabled(&self) -> bool { self.auto_sync && self.has_access_code() }
+}
+
 fn default_true() -> bool { true }
 impl Default for SyncSettings {
     fn default() -> Self { Self { auto_sync: false, access_code: String::new(), omni_overlay: true, omni_local_only: true, auto_merge: false, auto_update: true } }
@@ -36,6 +41,15 @@ pub fn native_score_blocked(enabled: bool, official_chart: Option<bool>) -> bool
     enabled && official_chart == Some(false)
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UploadRoute {
+    #[default]
+    Unknown,
+    NativeFireNet,
+    CrossNetwork,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayEvent {
@@ -44,12 +58,24 @@ pub struct PlayEvent {
     pub occurred_at: String,
     pub request: Value,
     pub recipient_key: String,
+    #[serde(default)] pub upload_route: UploadRoute,
     #[serde(default)] pub upload_allowed: bool,
     #[serde(default)] pub blocked_reason: Option<String>,
     #[serde(default)] pub attempts: u32,
     #[serde(default)] pub next_attempt_ms: u64,
     #[serde(default)] pub uploaded_at: Option<String>,
     #[serde(default)] pub upload_count: u32,
+}
+
+impl PlayEvent {
+    pub fn manual_upload_allowed(&self) -> bool {
+        self.upload_allowed && self.upload_route != UploadRoute::NativeFireNet
+    }
+
+    fn eligible_for_auto_sync(&self) -> bool {
+        self.upload_route == UploadRoute::CrossNetwork && self.upload_allowed
+            && self.uploaded_at.is_none() && self.blocked_reason.is_none()
+    }
 }
 
 #[derive(Serialize)]
@@ -86,7 +112,7 @@ pub fn save_settings(dir: &Path, settings: &SyncSettings) -> io::Result<()> {
 }
 pub fn new_event(request: Value, code: &str, upload_allowed: bool) -> PlayEvent {
     PlayEvent { schema_version: 1, event_id: uuid::Uuid::new_v4().to_string(),
-        occurred_at: Local::now().to_rfc3339(), request, recipient_key: recipient_key(code), upload_allowed,
+        occurred_at: Local::now().to_rfc3339(), request, recipient_key: recipient_key(code), upload_route: UploadRoute::Unknown, upload_allowed,
         blocked_reason: None, attempts: 0, next_attempt_ms: 0, uploaded_at: None, upload_count: 0 }
 }
 pub fn persist(dir: &Path, event: &PlayEvent) -> io::Result<PathBuf> {
@@ -213,15 +239,15 @@ pub fn mark_native_uploaded(dir: &Path, event_id: &str) -> io::Result<bool> {
 }
 
 pub fn flush_once(dir: &Path, settings: &SyncSettings, on_result: impl Fn(&str)) -> io::Result<()> {
-    if !settings.auto_sync || settings.access_code.is_empty() { return Ok(()); }
+    if !settings.auto_sync_enabled() { return Ok(()); }
     let mut events=list(dir)?;
     flush_events(&mut events,settings,on_result)
 }
 pub(super) fn flush_events(events: &mut [(PathBuf,PlayEvent)], settings: &SyncSettings, on_result: impl Fn(&str)) -> io::Result<()> {
-    if !settings.auto_sync || settings.access_code.is_empty() { return Ok(()); }
+    if !settings.auto_sync_enabled() { return Ok(()); }
     let key = recipient_key(&settings.access_code);
     for (path, event) in events {
-        if event.recipient_key != key || !event.upload_allowed || event.uploaded_at.is_some() || event.blocked_reason.is_some() || event.next_attempt_ms > unix_ms() { continue; }
+        if event.recipient_key != key || !event.eligible_for_auto_sync() || event.next_attempt_ms > unix_ms() { continue; }
         match submit(&event, &settings.access_code) {
             Ok(status) => {
                 mark_uploaded(event);
@@ -250,7 +276,7 @@ pub(super) fn flush_events(events: &mut [(PathBuf,PlayEvent)], settings: &SyncSe
 }
 
 pub fn manual_upload(dir: &Path, ids: &[String], confirm_duplicate: bool, settings: &SyncSettings) -> Result<usize, String> {
-    if settings.access_code.is_empty() { return Err("请先在设置中填写火网第三方访问码".into()); }
+    if !settings.has_access_code() { return Err("请先在设置中填写火网第三方访问码".into()); }
     if ids.is_empty() { return Err("请先选择最近游玩分数".into()); }
     let key = recipient_key(&settings.access_code);
     let events = list(dir).map_err(|e| e.to_string())?;
@@ -258,6 +284,7 @@ pub fn manual_upload(dir: &Path, ids: &[String], confirm_duplicate: bool, settin
     for id in ids {
         let (path, event) = events.iter().find(|(_, event)| &event.event_id == id).ok_or("选中的单局已不存在，请刷新列表")?;
         if !event.upload_allowed { return Err(format!("单局 {id} 不符合官方 AC 曲库，不能上传")); }
+        if !event.manual_upload_allowed() { return Err(format!("单局 {id} 由游戏提交至火网")); }
         if event.recipient_key != key && event.recipient_key != recipient_key("") {
             return Err(format!("单局 {id} 已绑定其他访问码，不能上传到当前账号"));
         }
@@ -325,7 +352,8 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
                 pg.checked_mul(2)?.checked_add(great)
             }),
             "module":music.and_then(|v| v["name"].as_str()).unwrap_or(""),
-            "uploadAllowed":event.upload_allowed,"uploadedAt":event.uploaded_at,
+            "uploadAllowed":event.upload_allowed,"manualUploadAllowed":event.manual_upload_allowed(),
+            "nativeFireNet":event.upload_route == UploadRoute::NativeFireNet,"uploadedAt":event.uploaded_at,
             "uploadCount":if event.uploaded_at.is_some() { event.upload_count.max(1) } else { 0 },
             "blocked":blocked}));
     }
@@ -381,6 +409,28 @@ pub fn recent_rows(dir: &Path) -> io::Result<Vec<Value>> {
         assert!(rows[0]["blocked"].as_str().unwrap().contains("中途死亡"));
         fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn automatic_sync_requires_an_access_code_even_for_legacy_settings() {
+        let settings: SyncSettings = serde_json::from_str(r#"{"autoSync":true,"accessCode":"  "}"#).unwrap();
+        assert!(!settings.auto_sync_enabled());
+    }
+
+    #[test]
+    fn fire_net_and_legacy_records_stay_out_of_the_automatic_upload_queue() {
+        let settings = SyncSettings { auto_sync: true, access_code: "test-only".into(), ..SyncSettings::default() };
+        let mut native = new_event(serde_json::json!({}), &settings.access_code, true);
+        native.upload_route = UploadRoute::NativeFireNet;
+        let mut legacy = serde_json::to_value(&native).unwrap();
+        legacy.as_object_mut().unwrap().remove("uploadRoute");
+        let legacy: PlayEvent = serde_json::from_value(legacy).unwrap();
+        assert!(!native.manual_upload_allowed());
+        assert!(legacy.manual_upload_allowed());
+
+        let mut events = [(PathBuf::new(), native), (PathBuf::new(), legacy)];
+        flush_events(&mut events, &settings, |_| panic!("unexpected third-party upload")).unwrap();
+        assert!(events.iter().all(|(_, event)| event.attempts == 0 && event.uploaded_at.is_none()));
+    }
+
     #[test] fn event_omits_access_code_and_preserves_identity() {
         let event = new_event(serde_json::json!({"name":"call","attributes":{"srcid":"ORIGINAL"}}), "secret-code", true);
         let encoded = serde_json::to_string(&event).unwrap();

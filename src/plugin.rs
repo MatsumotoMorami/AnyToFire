@@ -519,13 +519,19 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
     let mut profiles: HashMap<String, Profile> = HashMap::new();
     let mut recent_requests: HashMap<String, (Option<String>, std::time::Instant)> = HashMap::new();
     let mut native_pending: HashMap<usize, (String, u32, u8, std::time::Instant)> = HashMap::new();
-    let native_firenet = is_firenet_url(&url);
+    let upload_route = if is_firenet_url(&url) {
+        push::UploadRoute::NativeFireNet
+    } else if !url.trim().is_empty() {
+        push::UploadRoute::CrossNetwork
+    } else {
+        push::UploadRoute::Unknown
+    };
     let mut sync_queue=push::AutoSyncQueue::default();
     let mut last_flush = std::time::Instant::now() - std::time::Duration::from_secs(60);
     let mut last_queue_error = None;
     loop {
         let event = match rx.recv_timeout(std::time::Duration::from_secs(1)) { Ok(e)=>Some(e), Err(mpsc::RecvTimeoutError::Timeout)=>None, Err(_)=>break };
-        if last_flush.elapsed() >= std::time::Duration::from_secs(1) {
+        if upload_route == push::UploadRoute::CrossNetwork && last_flush.elapsed() >= std::time::Duration::from_secs(1) {
             match sync_queue.flush(&game_dir, log) {
                 Ok(()) => {
                     if last_queue_error.take().is_some() { log("自动同步队列已恢复"); }
@@ -543,7 +549,7 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
         let Some(event)=event else { continue; };
         if let Event::NativeAck { context, music, chart } = event {
             if let Some((id, expected_music, expected_chart, _)) = native_pending.get(&context) {
-                if native_firenet && (music, chart) == (*expected_music, *expected_chart) {
+                if (music, chart) == (*expected_music, *expected_chart) {
                     match push::mark_native_uploaded(&game_dir, id) {
                         Ok(marked) => {
                             if marked { log(&format!("单局 {id} 火网原生提交已确认，标记已上传")); }
@@ -571,13 +577,11 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
             recent_requests.retain(|_,(_, at)| at.elapsed() < std::time::Duration::from_secs(5));
             let settings=push::load_settings(&game_dir).unwrap_or_default();
             let official=trusted_catalog(&catalog) && push::official_chart(tree,&catalog,&catalog);
-            let auto_upload=official && settings.auto_sync && !settings.access_code.is_empty();
-            let expect_native=official && native_firenet && REG_RESPONSE_ACTIVE.load(Ordering::Acquire);
-            let mut play=push::new_event(tree.clone(),&settings.access_code,official);
-            if expect_native {
-                play.next_attempt_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_millis().saturating_add(120_000) as u64;
-            }
+            let auto_upload = official && upload_route == push::UploadRoute::CrossNetwork && settings.auto_sync_enabled();
+            let expect_native = official && upload_route == push::UploadRoute::NativeFireNet
+                && REG_RESPONSE_ACTIVE.load(Ordering::Acquire);
+            let mut play = push::new_event(tree.clone(), &settings.access_code, official);
+            play.upload_route = upload_route;
             match push::persist(&game_dir,&play) {
                 Ok(_) => {
                     let captured_at = std::time::Instant::now();
@@ -588,7 +592,7 @@ fn process_captures(rx: mpsc::Receiver<Event>, catalog: Catalog, dir: PathBuf, u
                             native_pending.insert(*context, (play.event_id.clone(), music, chart, captured_at));
                         }
                     }
-                    log(&format!("单局 {} 已保存；{}",play.event_id,if expect_native {"等待火网原生提交响应"} else if auto_upload {"AC 曲目，等待同步"} else if !official {"omni/删除/未知曲目，禁止上传"} else {"自动同步未开启，仅本地保存"}));
+                    log(&format!("单局 {} 已保存；{}",play.event_id,if expect_native {"等待火网原生提交响应"} else if auto_upload {"AC 曲目，等待同步"} else if !official {"omni/删除/未知曲目，禁止上传"} else {"仅保存本地记录"}));
                 }
                 Err(e) => log(&format!("单局保存失败: {e}")),
             }
@@ -887,6 +891,7 @@ mod config_tests {
         REG_RESPONSE_ACTIVE.store(false, Ordering::Release);
         let entries = push::list(&dir).unwrap();
         assert_eq!(entries.len(), 1);
+        assert!(entries[0].1.upload_route == push::UploadRoute::NativeFireNet);
         assert!(entries[0].1.uploaded_at.is_some());
         assert_eq!(entries[0].1.upload_count, 1);
         fs::remove_dir_all(dir).unwrap();

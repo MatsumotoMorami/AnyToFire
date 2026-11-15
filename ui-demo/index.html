@@ -48,6 +48,7 @@
     .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 6px 0 19px; font-size: 13px; font-weight: 650; }
     .setting-switch { width: 43px; height: 25px; border: 0; border-radius: 99px; background: #d5ded6; padding: 3px; transition: background .18s; flex: none; }
     .setting-switch::after { content: ""; display: block; width: 19px; height: 19px; background: white; border-radius: 50%; box-shadow: 0 1px 3px #20382d36; transition: transform .18s; }
+    .setting-switch:disabled { opacity: .48; cursor: not-allowed; }
     .setting-switch[aria-checked="true"] { background: var(--accent); }
     .setting-switch[aria-checked="true"]::after { transform: translateX(18px); }
     .logout-button { width: 100%; height: 42px; margin-top: 12px; font-size: 13px; }
@@ -176,8 +177,8 @@
     </main>
   </div>
   <div class="login-backdrop" id="init-backdrop"><div class="login-panel init-panel" role="dialog" aria-modal="true" aria-labelledby="init-title"><div class="login-head"><h2 id="init-title">初始化</h2></div><div class="init-version" id="init-version">正在识别游戏版本…</div><div class="init-steps"><div id="init-step-version">识别游戏版本</div><div id="init-step-score">初始化 IIDXScore</div><div id="init-step-migrate" hidden>旧版本 IIDXScore 迁移</div><div id="init-step-inject">注入 DLL</div></div><div class="init-status" id="init-status">正在准备…</div><button class="btn btn-primary login-submit" id="init-retry" type="button" hidden>重试</button></div></div>
-  <div class="login-backdrop" id="guide-backdrop"><div class="login-panel guide-panel" role="dialog" aria-modal="true" aria-labelledby="guide-title"><div class="login-head"><h2 id="guide-title">使用说明</h2><button class="login-close" id="guide-close" type="button" aria-label="关闭">&times;</button></div><div class="guide-copy"><p>本项目 AnyToFire 的功能包含：任意网的游戏档案保存与本地合并、任意网自动同步具体成绩至 FireNet，以及旧 IIDXScore 插件的全部功能（包括 Omnifix 分数本地保存与游戏内显示）。</p><strong>使用前准备</strong><p>使用火网打开 IIDX 并创建档案，在软件内填入 Firenet <b>第三方访问码</b>。</p><strong>推荐：自动同步</strong><p>挂载 DLL、填写访问码并开启自动同步后，符合条件的每局成绩会自动上传。无需上传游戏档案，也无需手动上传最近游玩分数。上传成功的单局会标记“已上传”；再次手动上传前会提示确认。omni 等不支持的曲目不会上传。</p><strong>慎用：档案同步</strong><p>游戏档案只保存每张谱面的最优成绩，无法还原每次游玩的分数与时间，也无法准确记录游玩次数。</p></div></div></div>
-  <div class="login-backdrop" id="settings-backdrop"><div class="login-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="login-head"><h2 id="settings-title">设置</h2><button class="login-close" id="settings-close" type="button" aria-label="关闭">&times;</button></div><label for="access-code">火网第三方访问码</label><input id="access-code" type="password" autocomplete="off" placeholder="填写访问码"><div class="setting-row"><span id="plugin-enabled-label">启用该插件</span><button class="setting-switch" id="plugin-enabled" type="button" role="switch" aria-labelledby="plugin-enabled-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-sync-label">开启自动同步</span><button class="setting-switch" id="auto-sync" type="button" role="switch" aria-labelledby="auto-sync-label" aria-checked="false"></button></div><div class="setting-row"><span id="omni-overlay-label">Omnifix 歌曲分数游戏内显示</span><button class="setting-switch" id="omni-overlay" type="button" role="switch" aria-labelledby="omni-overlay-label" aria-checked="true"></button></div><div class="setting-row"><span id="auto-merge-label">开启同一档案自动合并</span><button class="setting-switch" id="auto-merge" type="button" role="switch" aria-labelledby="auto-merge-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-update-label">自动更新</span><button class="setting-switch" id="auto-update" type="button" role="switch" aria-labelledby="auto-update-label" aria-checked="true"></button></div><button class="btn btn-primary login-submit" id="save-sync" type="button">保存设置</button><button class="btn btn-light logout-button" id="logout" type="button">清除访问码</button></div></div>
+  <div class="login-backdrop" id="guide-backdrop"><div class="login-panel guide-panel" role="dialog" aria-modal="true" aria-labelledby="guide-title"><div class="login-head"><h2 id="guide-title">使用说明</h2><button class="login-close" id="guide-close" type="button" aria-label="关闭">&times;</button></div><div class="guide-copy"><p>本项目 AnyToFire 的功能包含：任意网的游戏档案保存与本地合并、非火网成绩自动同步至 FireNet，以及旧 IIDXScore 插件的全部功能（包括 Omnifix 分数本地保存与游戏内显示）。</p><strong>使用前准备</strong><p>可直接完成初始化并保存设置。使用跨网同步时，请先用火网进入 IIDX 建立档案，再填写火网<b>第三方访问码</b>。</p><strong>推荐：自动同步</strong><p>填写访问码并开启自动同步后，连接非火网时，插件会将符合条件的单局同步到火网。直接连接火网时，提交和断网重试由游戏处理。</p><strong>慎用：档案同步</strong><p>游戏档案只保存每张谱面的最优成绩，无法还原每次游玩的分数与时间，也无法准确记录游玩次数。</p></div></div></div>
+  <div class="login-backdrop" id="settings-backdrop"><div class="login-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="login-head"><h2 id="settings-title">设置</h2><button class="login-close" id="settings-close" type="button" aria-label="关闭">&times;</button></div><label for="access-code">火网第三方访问码</label><input id="access-code" type="password" autocomplete="off" placeholder="选填，跨网同步时使用"><div class="setting-row"><span id="plugin-enabled-label">启用该插件</span><button class="setting-switch" id="plugin-enabled" type="button" role="switch" aria-labelledby="plugin-enabled-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-sync-label">自动同步非火网成绩到火网</span><button class="setting-switch" id="auto-sync" type="button" role="switch" aria-labelledby="auto-sync-label" aria-checked="false" disabled></button></div><div class="setting-row"><span id="omni-overlay-label">Omnifix 歌曲分数游戏内显示</span><button class="setting-switch" id="omni-overlay" type="button" role="switch" aria-labelledby="omni-overlay-label" aria-checked="true"></button></div><div class="setting-row"><span id="auto-merge-label">开启同一档案自动合并</span><button class="setting-switch" id="auto-merge" type="button" role="switch" aria-labelledby="auto-merge-label" aria-checked="false"></button></div><div class="setting-row"><span id="auto-update-label">自动更新</span><button class="setting-switch" id="auto-update" type="button" role="switch" aria-labelledby="auto-update-label" aria-checked="true"></button></div><button class="btn btn-primary login-submit" id="save-sync" type="button">保存设置</button><button class="btn btn-light logout-button" id="logout" type="button">清除访问码</button></div></div>
   <div class="modal-backdrop" id="modal-backdrop" role="presentation"><div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div class="modal-icon" id="modal-icon"><svg width="19" height="19" fill="none" stroke="currentColor"><use href="#i-merge"/></svg></div><h3 id="modal-title"></h3><label class="field-label" for="modal-input" id="modal-label"></label><input id="modal-input" maxlength="80"><select class="filter" id="modal-format" aria-label="导出格式"><option value="Fervidex JSON">Fervidex JSON</option><option value="KONAMI CSV">KONAMI CSV</option><option value="Asphyxia DB">Asphyxia DB</option></select><div class="modal-actions"><button class="btn btn-plain" id="modal-cancel" type="button">取消</button><button class="btn btn-primary" id="modal-confirm" type="button">确认</button></div></div></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>
@@ -363,22 +364,32 @@ document.addEventListener('click',event=>{const button=event.target.closest('[da
     el('tab-recent').addEventListener('click', () => switchView('recent'));
     let initialSetup = false;
     function closeSettings() { if (initialSetup) return; el('settings-backdrop').classList.remove('open'); el('settings-open').focus(); }
-    el('settings-open').addEventListener('click', () => { el('settings-backdrop').classList.add('open'); el('auto-sync').focus(); });
+    el('settings-open').addEventListener('click', () => { el('settings-backdrop').classList.add('open'); el('access-code').focus(); });
     el('settings-close').addEventListener('click', closeSettings);
     el('settings-backdrop').addEventListener('click', event => { if (event.target === el('settings-backdrop')) closeSettings(); });
-    el('auto-sync').addEventListener('click', () => { const enabled = el('auto-sync').getAttribute('aria-checked') !== 'true'; el('auto-sync').setAttribute('aria-checked', String(enabled)); });
+    function updateAutoSyncControl() {
+      const toggle = el('auto-sync');
+      toggle.disabled = !(demoHasCode || el('access-code').value.trim());
+      if (toggle.disabled) toggle.setAttribute('aria-checked', 'false');
+    }
+    el('access-code').addEventListener('input', updateAutoSyncControl);
+    el('auto-sync').addEventListener('click', () => { if (el('auto-sync').disabled) return; const enabled = el('auto-sync').getAttribute('aria-checked') !== 'true'; el('auto-sync').setAttribute('aria-checked', String(enabled)); });
     el('plugin-enabled').addEventListener('click', () => { const enabled = el('plugin-enabled').getAttribute('aria-checked') !== 'true'; el('plugin-enabled').setAttribute('aria-checked', String(enabled)); });
     el('omni-overlay').addEventListener('click', () => { const enabled = el('omni-overlay').getAttribute('aria-checked') !== 'true'; el('omni-overlay').setAttribute('aria-checked', String(enabled)); });
     el('save-sync').addEventListener('click', () => {
-      if (el('auto-sync').getAttribute('aria-checked') === 'true' && !el('access-code').value.trim() && !demoHasCode) { toast('请填写访问码'); return; }
       if (el('access-code').value.trim()) demoHasCode = true;
-      if (demoHasCode) { initialSetup = false; el('settings-backdrop').classList.remove('initial-setup'); }
+      if (initialSetup) {
+        initialSetup = false;
+        el('settings-backdrop').classList.remove('initial-setup');
+        closeSettings();
+      }
       el('access-code').value = '';
-      el('access-code').placeholder = demoHasCode ? '已填写' : '填写访问码';
+      el('access-code').placeholder = demoHasCode ? '已填写' : '选填，跨网同步时使用';
+      updateAutoSyncControl();
       toast('演示：设置已保存');
     });
     ['auto-merge','auto-update'].forEach(id=>el(id).addEventListener('click',()=>el(id).setAttribute('aria-checked',String(el(id).getAttribute('aria-checked')!=='true'))));
-el('logout').addEventListener('click', () => { demoHasCode = false; el('access-code').value = ''; el('access-code').placeholder = '填写访问码'; el('auto-sync').setAttribute('aria-checked','false'); toast('演示：已清除访问码'); });
+el('logout').addEventListener('click', () => { demoHasCode = false; el('access-code').value = ''; el('access-code').placeholder = '选填，跨网同步时使用'; updateAutoSyncControl(); toast('演示：已清除访问码'); });
     let showSettingsAfterGuide = false;
     let demoInitPending = false;
     function startDemoInit() {

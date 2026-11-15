@@ -21,8 +21,7 @@ function updateArchiveHeaders() {
 const selection = new Set();
 const recentSelection = new Set();
 let activeModal = null;
-let settingsReceived = false;
-let showSettingsAfterGuide = false;
+let hasSavedAccessCode = false;
 let initPendingVersion = null;
 let initializing = false;
 let initialSetup = false;
@@ -63,6 +62,12 @@ function finishInitialization() {
   tick();
 }
 const el = id => document.getElementById(id);
+function updateAutoSyncControl() {
+  const toggle = el('auto-sync');
+  toggle.disabled = !(hasSavedAccessCode || el('access-code').value.trim());
+  if (toggle.disabled) toggle.setAttribute('aria-checked', 'false');
+}
+const canSelectRecent = item => item.manualUploadAllowed ?? item.uploadAllowed;
 const icon = name => `<svg fill="none" stroke="currentColor"><use href="#i-${name}"/></svg>`;
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
 function displayTime(value) {
@@ -139,9 +144,15 @@ window.anytofireReceive = message => {
     el('auto-merge').setAttribute('aria-checked', String(!!message.autoMerge));
     el('auto-update').setAttribute('aria-checked', String(message.autoUpdate !== false));
     el('access-code').value = '';
-    el('access-code').placeholder = message.hasAccessCode ? '已填写' : '填写访问码';
-    if (initialSetup && !initializing && message.hasAccessCode) { initialSetup = false; el('settings-backdrop').classList.remove('initial-setup'); }
-    settingsReceived = true;
+    hasSavedAccessCode = message.hasAccessCode;
+    el('access-code').placeholder = hasSavedAccessCode ? '已填写' : '选填，跨网同步时使用';
+    updateAutoSyncControl();
+  } else if (message.type === 'settings_saved') {
+    if (initialSetup) {
+      initialSetup = false;
+      el('settings-backdrop').classList.remove('initial-setup');
+      closeSettings();
+    }
   } else if (message.type === 'hook_state') {
     el('plugin-enabled').setAttribute('aria-checked', String(message.pluginEnabled));
     lastHookSource = message.hookSource || 'cfg';
@@ -158,10 +169,6 @@ window.anytofireReceive = message => {
       initPendingVersion = null;
       startInitialization(version);
     }
-  } else if (message.type === 'initialization' && !message.hasAccessCode) {
-    showSettingsAfterGuide = true;
-    initialSetup = true;
-    openGuide();
   } else if (message.type === 'init_prepared') {
     el('init-step-score').classList.add('done');
     if (message.migrationNeeded) {
@@ -185,7 +192,7 @@ window.anytofireReceive = message => {
     finishInitialization();
   } else if (message.type === 'recent') {
     recentItems = message.items;
-    for (const id of recentSelection) if (!recentItems.some(x => x.eventId === id)) recentSelection.delete(id);
+    for (const id of recentSelection) if (!recentItems.some(x => x.eventId === id && canSelectRecent(x))) recentSelection.delete(id);
     renderRecent();
     if (el('refresh-recent').disabled) {
       el('refresh-recent').disabled = false;
@@ -206,13 +213,17 @@ window.anytofireReceive = message => {
 function renderRecent() {
   const list = el('recent-list');
   list.classList.toggle('recent-empty', recentItems.length === 0);
-  list.innerHTML = recentItems.length ? `<table><thead><tr><th><input id="recent-select-all" type="checkbox" aria-label="选择所有可上传单局"></th>${sortHeader('时间','occurredAt','recent',recentSort)}${sortHeader('游戏版本','module','recent',recentSort)}${sortHeader('曲目','title','recent',recentSort)}${sortHeader('EX Score','exScore','recent',recentSort)}${sortHeader('同步','syncSort','recent',recentSort)}</tr></thead><tbody>${[...recentItems].map(x=>({...x,syncSort:x.uploadedAt?'已上传':!x.uploadAllowed?'拒绝':(/HTTP 401|ACCESS_CODE_INVALID|ACCESS_CODE_EXPIRED|访问码.{0,8}拒绝/.test(x.blocked || '')?'拒绝':x.blocked?'错误':'待上传')})).sort((a,b)=>compareRows(a,b,recentSort)).map(x => `<tr class="${x.uploadedAt ? 'recent-uploaded' : ''} ${recentSelection.has(x.eventId) ? 'selected' : ''}"><td><input class="recent-check" type="checkbox" data-id="${escapeHtml(x.eventId)}" aria-label="选择 ${escapeHtml(x.title)}" ${recentSelection.has(x.eventId) ? 'checked' : ''} ${!x.uploadAllowed ? 'disabled' : ''}></td><td>${escapeHtml(displayTime(x.occurredAt))}</td><td>${versionName(x.module)}</td><td class="recent-title" title="${escapeHtml(x.title)}">${escapeHtml(x.title)}</td><td>${x.exScore == null ? '—' : escapeHtml(x.exScore)}</td><td>${syncBadge(x)}</td></tr>`).join('')}</tbody></table>` : '暂无最近游玩分数';
-  const all = recentItems.filter(x => x.uploadAllowed);
-  if (all.length) el('recent-select-all').checked = all.every(x => recentSelection.has(x.eventId));
+  list.innerHTML = recentItems.length ? `<table><thead><tr><th><input id="recent-select-all" type="checkbox" aria-label="选择所有可上传单局"></th>${sortHeader('时间','occurredAt','recent',recentSort)}${sortHeader('游戏版本','module','recent',recentSort)}${sortHeader('曲目','title','recent',recentSort)}${sortHeader('EX Score','exScore','recent',recentSort)}${sortHeader('同步','syncSort','recent',recentSort)}</tr></thead><tbody>${[...recentItems].map(x=>({...x,syncSort:x.uploadedAt?'已上传':!x.uploadAllowed?'拒绝':(/HTTP 401|ACCESS_CODE_INVALID|ACCESS_CODE_EXPIRED|访问码.{0,8}拒绝/.test(x.blocked || '')?'拒绝':x.blocked?'错误':x.nativeFireNet?'等待游戏提交':'待上传')})).sort((a,b)=>compareRows(a,b,recentSort)).map(x => `<tr class="${x.uploadedAt ? 'recent-uploaded' : ''} ${recentSelection.has(x.eventId) ? 'selected' : ''}"><td><input class="recent-check" type="checkbox" data-id="${escapeHtml(x.eventId)}" aria-label="选择 ${escapeHtml(x.title)}" ${recentSelection.has(x.eventId) ? 'checked' : ''} ${!canSelectRecent(x) ? 'disabled' : ''}></td><td>${escapeHtml(displayTime(x.occurredAt))}</td><td>${versionName(x.module)}</td><td class="recent-title" title="${escapeHtml(x.title)}">${escapeHtml(x.title)}</td><td>${x.exScore == null ? '—' : escapeHtml(x.exScore)}</td><td>${syncBadge(x)}</td></tr>`).join('')}</tbody></table>` : '暂无最近游玩分数';
+  const all = recentItems.filter(canSelectRecent);
+  const selectAll = el('recent-select-all');
+  if (selectAll) {
+    selectAll.disabled = all.length === 0;
+    selectAll.checked = all.length > 0 && all.every(x => recentSelection.has(x.eventId));
+  }
   el('upload-recent').disabled = recentSelection.size === 0;
   el('upload-recent').textContent = `上传所选 ${recentSelection.size}`;
-  el('select-pending-recent').disabled = !recentItems.some(x => x.uploadAllowed && !x.uploadedAt);
-  el('select-all-recent').disabled = !recentItems.some(x => x.uploadAllowed);
+  el('select-pending-recent').disabled = !recentItems.some(x => canSelectRecent(x) && !x.uploadedAt);
+  el('select-all-recent').disabled = !recentItems.some(canSelectRecent);
   el('select-all-recent').textContent = recentSelection.size ? '取消选中' : '全选';
 }
 function versionName(module) { return module === 'IIDX33music' ? 'Sparkle Shower' : module === 'IIDX34music' ? 'ZINRAI' : '未知'; }
@@ -220,6 +231,7 @@ function syncBadge(item) {
   let kind, label, detail;
   if (item.uploadedAt) { kind = 'uploaded'; label = '已上传'; detail = `成功 ${Math.max(1, item.uploadCount || 0)} 次`; }
   else if (!item.uploadAllowed || /HTTP 401|ACCESS_CODE_INVALID|ACCESS_CODE_EXPIRED|访问码.{0,8}拒绝/.test(item.blocked || '')) { kind = 'refused'; label = '拒绝'; detail = item.blocked || '曲目或谱面不在受支持的 AC 曲库（omni、删除曲等）'; }
+  else if (item.nativeFireNet) { kind = 'pending'; label = '等待游戏提交'; detail = '联网后由游戏原生上传流程处理'; }
   else if (item.blocked) { kind = 'error'; label = '错误'; detail = item.blocked; }
   else { kind = 'pending'; label = '待上传'; detail = ''; }
   return `<span class="sync-badge ${kind}"${detail ? ` title="${escapeHtml(detail)}"` : ''}>${label}</span>`;
@@ -249,7 +261,7 @@ function deleteDialog(id) { const item = items.find(x => x.id === id); if (item)
 function identityDialog(id) { const item = items.find(x => x.id === id); if (item) openModal({type:'identity', id, title:'设置 IIDX ID', label:'IIDX ID', value:item.iidx === '—' ? '' : item.iidx, action:'保存'}); }
 function exportDialog(id) { const item = items.find(x => x.id === id); if (item) openModal({type:'export', id, title:`导出 · ${item.name}`, input:false, action:'导出'}); }
 function uploadRecentDialog() {
-  const chosen = recentItems.filter(x => recentSelection.has(x.eventId));
+  const chosen = recentItems.filter(x => canSelectRecent(x) && recentSelection.has(x.eventId));
   if (!chosen.length) return;
   const duplicates = chosen.filter(x => x.uploadedAt).length;
   if (duplicates) openModal({type:'reupload', title:'确认再次上传？', label:`所选 ${chosen.length} 项中有 ${duplicates} 项已上传。是否再次向火网发送这些成绩？`, input:false, action:'仍要上传'});
@@ -272,12 +284,12 @@ function confirmModal() {
 }
 el('rows').addEventListener('change', event => { if (!event.target.matches('.row-check')) return; event.target.checked ? selection.add(event.target.dataset.id) : selection.delete(event.target.dataset.id); render(); });
 el('recent-list').addEventListener('change', event => {
-  if (event.target.id === 'recent-select-all') recentItems.filter(x => x.uploadAllowed).forEach(x => event.target.checked ? recentSelection.add(x.eventId) : recentSelection.delete(x.eventId));
+  if (event.target.id === 'recent-select-all') recentItems.filter(canSelectRecent).forEach(x => event.target.checked ? recentSelection.add(x.eventId) : recentSelection.delete(x.eventId));
   else if (event.target.matches('.recent-check')) event.target.checked ? recentSelection.add(event.target.dataset.id) : recentSelection.delete(event.target.dataset.id);
   renderRecent();
 });
-el('select-pending-recent').addEventListener('click', () => { recentSelection.clear(); recentItems.filter(x => x.uploadAllowed && !x.uploadedAt).forEach(x => recentSelection.add(x.eventId)); renderRecent(); });
-el('select-all-recent').addEventListener('click', () => { if (recentSelection.size) recentSelection.clear(); else recentItems.filter(x => x.uploadAllowed).forEach(x => recentSelection.add(x.eventId)); renderRecent(); });
+el('select-pending-recent').addEventListener('click', () => { recentSelection.clear(); recentItems.filter(x => canSelectRecent(x) && !x.uploadedAt).forEach(x => recentSelection.add(x.eventId)); renderRecent(); });
+el('select-all-recent').addEventListener('click', () => { if (recentSelection.size) recentSelection.clear(); else recentItems.filter(canSelectRecent).forEach(x => recentSelection.add(x.eventId)); renderRecent(); });
 el('upload-recent').addEventListener('click', uploadRecentDialog);
 el('refresh-recent').addEventListener('click', () => { el('refresh-recent').disabled = true; call('refresh'); });
 el('rows').addEventListener('click', event => {
@@ -308,11 +320,12 @@ function switchView(view) {
 el('tab-archives').addEventListener('click', () => switchView('archives'));
 el('tab-recent').addEventListener('click', () => switchView('recent'));
 function closeSettings() { if (initialSetup) return; el('settings-backdrop').classList.remove('open'); el('settings-open').focus(); }
-el('settings-open').addEventListener('click', () => { el('settings-backdrop').classList.add('open'); el('auto-sync').focus(); });
+el('settings-open').addEventListener('click', () => { el('settings-backdrop').classList.add('open'); el('access-code').focus(); });
 el('settings-close').addEventListener('click', closeSettings);
 el('settings-backdrop').addEventListener('click', event => { if (event.target === el('settings-backdrop')) closeSettings(); });
 el('init-retry').addEventListener('click', () => runInit(initAction));
-el('auto-sync').addEventListener('click', () => { const enabled = el('auto-sync').getAttribute('aria-checked') !== 'true'; el('auto-sync').setAttribute('aria-checked', String(enabled)); });
+el('access-code').addEventListener('input', updateAutoSyncControl);
+el('auto-sync').addEventListener('click', () => { if (el('auto-sync').disabled) return; const enabled = el('auto-sync').getAttribute('aria-checked') !== 'true'; el('auto-sync').setAttribute('aria-checked', String(enabled)); });
 el('plugin-enabled').addEventListener('click', () => { const enabled = el('plugin-enabled').getAttribute('aria-checked') !== 'true'; el('plugin-enabled').disabled = true; call('set_plugin_enabled', {enabled}); });
 el('hook-source').addEventListener('change', () => call('set_hook_source', {source: el('hook-source').value}));
 el('init-start').addEventListener('click', () => { initSourcePending = true; el('init-start').disabled = true; call('set_hook_source', {source: el('init-hook-source').value}); });
@@ -326,7 +339,6 @@ function closeGuide() {
   if (!el('guide-backdrop').classList.contains('open')) return;
   el('guide-backdrop').classList.remove('open'); el('guide-button').setAttribute('aria-expanded', 'false');
   if (initPendingVersion !== null) { el('init-backdrop').classList.add('open'); el('init-choice').hidden = false; el('init-steps').hidden = true; el('init-status').textContent = ''; }
-  else if (showSettingsAfterGuide) { showSettingsAfterGuide = false; el('settings-backdrop').classList.add('open','initial-setup'); el('access-code').focus(); }
   else el('guide-button').focus();
 }
 el('guide-button').addEventListener('click', openGuide);

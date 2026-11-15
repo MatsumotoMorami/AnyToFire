@@ -30,7 +30,7 @@ pub struct AutoSyncQueue{
  settings:Option<(Option<Stamp>,SyncSettings)>,settings_file:PathBuf,
  #[cfg(test)] parsed:usize,
 }
-fn active(e:&PlayEvent)->bool{e.upload_allowed&&e.uploaded_at.is_none()&&e.blocked_reason.is_none()}
+fn active(e:&PlayEvent)->bool{e.eligible_for_auto_sync()}
 impl AutoSyncQueue{
  fn settings(&mut self,dir:&Path)->io::Result<SyncSettings>{
   let path=super::settings_path(dir);if self.settings_file!=path{self.settings=None;self.settings_file=path.clone();}let current=match stamp(&path){Ok(v)=>Some(v),Err(e)if e.kind()==io::ErrorKind::NotFound=>None,Err(e)=>return Err(e)};
@@ -75,7 +75,7 @@ impl AutoSyncQueue{
   self.dirty=result.is_err();if result.is_ok(){self.checked=Some(Instant::now());}result
  }
  pub fn flush(&mut self,dir:&Path,on_result:impl Fn(&str))->io::Result<()> {
-  let settings=self.settings(dir)?;if !settings.auto_sync||settings.access_code.is_empty(){return Ok(())}
+  let settings=self.settings(dir)?;if !settings.auto_sync_enabled(){return Ok(())}
   self.refresh(dir)?;
   let mut pending:Vec<_>=self.files.iter().filter_map(|(p,(_,e))|e.as_ref().map(|e|(p.clone(),e.clone()))).collect();
   pending.sort_by(|a,b|a.1.occurred_at.cmp(&b.1.occurred_at));
@@ -89,7 +89,8 @@ impl AutoSyncQueue{
  use super::*;
  #[test]fn queue_reads_only_changed_files_and_observes_native_ack(){
   let dir=std::env::temp_dir().join(format!("atf-queue-cache-{}",uuid::Uuid::new_v4()));
-  let a=super::super::new_event(serde_json::json!({"children":[]}),"",true);
+  let mut a=super::super::new_event(serde_json::json!({"children":[]}),"",true);
+  a.upload_route=super::super::UploadRoute::CrossNetwork;
   super::super::persist(&dir,&a).unwrap();let mut q=AutoSyncQueue::default();q.refresh(&dir).unwrap();assert_eq!(q.parsed,1);
   fs::create_dir(super::super::queue_path(&dir).join("ignored.json")).unwrap();
   assert_eq!(super::super::list(&dir).unwrap().len(), 1);
@@ -117,7 +118,9 @@ impl AutoSyncQueue{
   let dir=std::env::temp_dir().join(format!("atf-settings-cache-{}",uuid::Uuid::new_v4()));fs::create_dir_all(&dir).unwrap();
   let mut q=AutoSyncQueue::default();assert!(!q.settings(&dir).unwrap().auto_sync);
   let settings=SyncSettings{auto_sync:true,access_code:"test-only".into(),..Default::default()};super::super::save_settings(&dir,&settings).unwrap();assert!(q.settings(&dir).unwrap().auto_sync);
-  let mut event=super::super::new_event(serde_json::json!({"children":[]}),"test-only",true);event.next_attempt_ms=u64::MAX;
+  let mut event=super::super::new_event(serde_json::json!({"children":[]}),"test-only",true);
+  event.upload_route=super::super::UploadRoute::CrossNetwork;
+  event.next_attempt_ms=u64::MAX;
   super::super::persist(&dir,&event).unwrap();q.flush(&dir,|_|panic!("must not upload before retry deadline")).unwrap();assert_eq!(q.parsed,1);
   q.flush(&dir,|_|panic!("must not upload before retry deadline")).unwrap();assert_eq!(q.parsed,1);
   fs::remove_dir_all(dir).unwrap();
