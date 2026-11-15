@@ -186,19 +186,20 @@
   </div>
   <div class="login-backdrop" id="init-backdrop"><div class="login-panel init-panel" role="dialog" aria-modal="true" aria-labelledby="init-title"><div class="login-head"><h2 id="init-title">初始化</h2></div><div class="init-version" id="init-version">正在识别游戏版本…</div><div class="hook-choice" id="init-choice">
   <fieldset class="hook-modes" id="init-hook-source">
-    <legend>选择启动方式</legend>
-    <label><input type="radio" name="init-hook-source" value="cfg" checked>CFG 配置（spicetools.xml）</label>
-    <label><input type="radio" name="init-hook-source" value="bat">BAT / 命令行（手动配置）</label>
+    <legend>选择插件加载方式</legend>
+    <label><input type="radio" name="init-hook-source" value="cfg" checked>XML 自动配置（双击或 BAT 启动）</label>
+    <label><input type="radio" name="init-hook-source" value="bat">BAT / 命令行（手动填写 -k）</label>
   </fieldset>
   <button class="btn btn-primary login-submit" id="init-start" type="button">开始初始化</button></div><div class="init-steps" id="init-steps" hidden><div id="init-step-version">识别游戏版本</div><div id="init-step-score">初始化 IIDXScore</div><div id="init-step-migrate" hidden>旧版本 IIDXScore 迁移</div><div id="init-step-inject">注入 DLL</div></div><div class="init-status" id="init-status"></div><button class="btn btn-primary login-submit" id="init-retry" type="button" hidden>重试</button></div></div>
   <div class="login-backdrop" id="guide-backdrop"><div class="login-panel guide-panel" role="dialog" aria-modal="true" aria-labelledby="guide-title"><div class="login-head"><h2 id="guide-title">使用说明</h2><button class="login-close" id="guide-close" type="button" aria-label="关闭">&times;</button></div><div class="guide-copy"><p>本项目 AnyToFire 的功能包含：任意网的游戏档案保存与本地合并、非火网成绩自动同步至 FireNet，以及旧 IIDXScore 插件的全部功能（包括 Omnifix 分数本地保存与游戏内显示）。</p><strong>使用前准备</strong><p>可直接完成初始化并保存设置。使用跨网同步时，请先用火网进入 IIDX 建立档案，再填写火网<b>第三方访问码</b>。</p><strong>推荐：自动同步</strong><p>填写访问码并开启自动同步后，连接非火网时，插件会将符合条件的单局同步到火网。直接连接火网时，提交和断网重试由游戏处理。</p><strong>慎用：档案同步</strong><p>游戏档案只保存每张谱面的最优成绩，无法还原每次游玩的分数与时间，也无法准确记录游玩次数。</p></div></div></div>
   <div class="login-backdrop" id="settings-backdrop"><div class="login-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title"><div class="login-head"><h2 id="settings-title">设置</h2><button class="login-close" id="settings-close" type="button" aria-label="关闭">&times;</button></div>
   <fieldset class="hook-modes" id="hook-source">
-    <legend>启动方式</legend>
-    <label><input type="radio" name="hook-source" value="cfg" checked>CFG 配置（spicetools.xml）</label>
-    <label><input type="radio" name="hook-source" value="bat">BAT / 命令行（手动配置）</label>
+    <legend>插件加载方式</legend>
+    <label><input type="radio" name="hook-source" value="cfg" checked>XML 自动配置（双击或 BAT 启动）</label>
+    <label><input type="radio" name="hook-source" value="bat">BAT / 命令行（手动填写 -k）</label>
   </fieldset>
 
+  <p class="manual-hook" id="cfg-hook-error" role="status" hidden></p>
   <div class="manual-hook" id="manual-hook" hidden>
     <p>编辑实际用于启动 Spice64 的命令。删掉旧的 AnyToFire.dll 路径，再加入下方参数。每条启动命令只保留一个 AnyToFire，其他 DLL 的参数照常保留。</p>
     <div class="manual-hook-copy" id="manual-hook-copy">

@@ -6,10 +6,10 @@
 
 本地存分、初始化和保存设置可直接使用。需要跨网同步时，请先用火网进入 IIDX 建立档案，再填写火网**第三方访问码**。
 
-将发布包中的 DLL、EXE 和 WebView2Loader.dll 一起放到 IIDX 游戏根目录，或放到游戏目录下的子目录，例如 `AnyToFire`、`modules` 或 `plugins\AnyToFire`。游戏根目录含有 `data\info\0\music_data.bin`。启动安装位置的 `AnyToFire.exe` 后，按实际启动方式配置。
+将发布包中的 DLL、EXE 和 WebView2Loader.dll 一起放到 IIDX 游戏根目录，或放到游戏目录下的子目录，例如 `AnyToFire`、`modules` 或 `plugins\AnyToFire`。游戏根目录含有 `data\info\0\music_data.bin`。启动安装位置的 `AnyToFire.exe` 后，选择由 XML 或命令行加载插件。
 
-- **BAT / 命令行**。在设置中选择「BAT / 命令行（手动配置）」并复制 `-k` 参数。编辑你实际用于启动 `spice64.exe` 的脚本，删除旧的 AnyToFire.dll 路径，再添加复制的参数。如果一个旧的 `-k` 中还列有其他 DLL，只从列表中移除 AnyToFire.dll。每条启动命令只保留一份 AnyToFire。若之前已在启动器的 cfg 中手动启用 AnyToFire，也请清理重复项。迁移旧版 IIDXScore 后，请手动移除脚本里单独加载 IIDXScore.dll 的参数。AnyToFire 不会读取或修改 BAT/CMD 文件。
-- **cfg**。在设置中选择「cfg 配置（spicetools.xml）」，然后通过「启用该插件」管理 IIDX 配置中的 `-k`。
+- **BAT / 命令行**。在设置中选择「BAT / 命令行（手动填写 -k）」并复制 `-k` 参数。编辑你实际用于启动 `spice64.exe` 的脚本，删除旧的 AnyToFire.dll 路径，再添加复制的参数。如果一个旧的 `-k` 中还列有其他 DLL，只从列表中移除 AnyToFire.dll。每条启动命令只保留一份 AnyToFire。若之前已在启动器的 cfg 中手动启用 AnyToFire，也请清理重复项。迁移旧版 IIDXScore 后，请手动移除脚本里单独加载 IIDXScore.dll 的参数。AnyToFire 不会读取或修改 BAT/CMD 文件。
+- **XML 自动配置**。Spice2x 双击启动或通过 BAT 启动都会读取 XML，并合并其中的 IIDX 选项和命令行参数。在设置中选择「XML 自动配置」，用「启用该插件」管理默认的 `%APPDATA%\spicetools.xml`。初始化或启用时会补建缺少的 `k`，已初始化的 XML 模式也会修复缺失项，除非你已关闭插件。BAT 里只保留其他插件的 `-k`，避免 AnyToFire 重复加载。使用 `-cfgpath` 指定其他 XML 时，请在指定的文件中手动配置，或用命令行模式。
 
 两种方式均使用 EXE 旁边 DLL 的绝对路径，兼容从游戏根目录或 `modules` 启动。路径含空格、非 ASCII 字符或批处理特殊字符时，会尝试 Windows 短路径。如系统无法提供可用的短路径，请把 AnyToFire 放到完整路径仅含 ASCII 且不含空格或批处理特殊字符的目录。移动安装目录后，BAT 用户需重新复制参数，cfg 用户打开软件即可刷新路径。
 

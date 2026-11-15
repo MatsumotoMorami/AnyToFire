@@ -73,6 +73,8 @@ function updateHookState(message) {
   el('plugin-enabled-row').hidden = manual;
   el('plugin-enabled').disabled = manual;
   el('plugin-enabled').setAttribute('aria-checked', String(!!message.pluginEnabled));
+  el('cfg-hook-error').hidden = manual || !message.hookError;
+  el('cfg-hook-error').textContent = manual ? '' : (message.hookError || '');
   el('manual-hook').hidden = !manual;
   el('manual-hook-copy').hidden = !message.hookArg;
   el('manual-hook-arg').value = message.hookArg || '';

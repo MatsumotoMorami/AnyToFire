@@ -1,6 +1,6 @@
 [package]
 name = "anytofire"
-version = "0.3.21"
+version = "0.3.22"
 edition = "2021"
 
 [lib]
@@ -22,6 +22,7 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4", "serde"] }
 ureq = { version = "2", default-features = false, features = ["native-tls", "json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+roxmltree = "0.21"
 
 [profile.release]
 lto = true
