@@ -6,7 +6,12 @@
 
 本地存分、初始化和保存设置可直接使用。需要跨网同步时，请先用火网进入 IIDX 建立档案，再填写火网**第三方访问码**。
 
-将发布包中的 DLL、EXE 和 WebView2Loader.dll 一起放到 IIDX 游戏根目录，或放到游戏目录下的子目录，例如 `AnyToFire`、`modules` 或 `plugins\AnyToFire`。游戏根目录含有 `data\info\0\music_data.bin`。启动所选位置的 `AnyToFire.exe`，按实际启动方式选择 cfg 或 start.bat。AnyToFire 会按 EXE 旁边的 DLL 生成注入路径，已有的成绩、设置和曲库继续从游戏目录读取。Spice 会按空白拆分 DLL 列表，请使用无空格的子目录名。
+将发布包中的 DLL、EXE 和 WebView2Loader.dll 一起放到 IIDX 游戏根目录，或放到游戏目录下的子目录，例如 `AnyToFire`、`modules` 或 `plugins\AnyToFire`。游戏根目录含有 `data\info\0\music_data.bin`。启动安装位置的 `AnyToFire.exe` 后，按实际启动方式配置。
+
+- **BAT / 命令行**。在设置中选择「BAT / 命令行（手动配置）」并复制 `-k` 参数。编辑你实际用于启动 `spice64.exe` 的脚本，删除旧的 AnyToFire.dll 路径，再添加复制的参数。如果一个旧的 `-k` 中还列有其他 DLL，只从列表中移除 AnyToFire.dll。每条启动命令只保留一份 AnyToFire。若之前已在启动器的 cfg 中手动启用 AnyToFire，也请清理重复项。迁移旧版 IIDXScore 后，请手动移除脚本里单独加载 IIDXScore.dll 的参数。AnyToFire 不会读取或修改 BAT/CMD 文件。
+- **cfg**。在设置中选择「cfg 配置（spicetools.xml）」，然后通过「启用该插件」管理 IIDX 配置中的 `-k`。
+
+两种方式均使用 EXE 旁边 DLL 的绝对路径，兼容从游戏根目录或 `modules` 启动。路径含空格、非 ASCII 字符或批处理特殊字符时，会尝试 Windows 短路径。如系统无法提供可用的短路径，请把 AnyToFire 放到完整路径仅含 ASCII 且不含空格或批处理特殊字符的目录。移动安装目录后，BAT 用户需重新复制参数，cfg 用户打开软件即可刷新路径。
 
 当前 DLL 支持 IIDX 33 的 0331、0422、0909，以及 IIDX 34 的 010-0916、012-0916、010-0917、010-1013、010-1027 和 012-1027。各版本使用独立签名，未知构建不会安装钩子。012-1027 的五组成绩接口与方法表通过离线装载验证。自动同步继续要求已校验的 AC 曲库，实际登录、结算和上传仍需实机确认。
 

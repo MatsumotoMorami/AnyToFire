@@ -62,6 +62,29 @@ function finishInitialization() {
   tick();
 }
 const el = id => document.getElementById(id);
+function selectHookMode(id, value) {
+  el(id).querySelector(`input[value="${value}"]`).checked = true;
+}
+function updateHookState(message) {
+  lastHookSource = message.hookSource || 'cfg';
+  const manual = lastHookSource === 'bat';
+  selectHookMode('hook-source', lastHookSource);
+  selectHookMode('init-hook-source', lastHookSource);
+  el('plugin-enabled-row').hidden = manual;
+  el('plugin-enabled').disabled = manual;
+  el('plugin-enabled').setAttribute('aria-checked', String(!!message.pluginEnabled));
+  el('manual-hook').hidden = !manual;
+  el('manual-hook-copy').hidden = !message.hookArg;
+  el('manual-hook-arg').value = message.hookArg || '';
+  el('manual-hook-error').hidden = !message.hookError;
+  el('manual-hook-error').textContent = message.hookError || '';
+  el('init-step-inject').textContent = manual ? '保存手动启动方式' : '配置 DLL 加载';
+}
+function preparePluginLaunch() {
+  initStep('inject');
+  el('init-status').textContent = lastHookSource === 'bat' ? '正在保存初始化状态…' : '正在更新 DLL 加载配置…';
+  runInit('init_inject');
+}
 function updateAutoSyncControl() {
   const toggle = el('auto-sync');
   toggle.disabled = !(hasSavedAccessCode || el('access-code').value.trim());
@@ -133,11 +156,7 @@ window.anytofireReceive = message => {
     for (const id of selection) if (!items.some(x => x.id === id)) selection.delete(id);
     render();
   } else if (message.type === 'settings') {
-    el('plugin-enabled').setAttribute('aria-checked', String(message.pluginEnabled));
-    lastHookSource = message.hookSource || 'cfg';
-    el('hook-source').value = lastHookSource;
-    el('init-hook-source').value = lastHookSource;
-    el('plugin-enabled').disabled = false;
+    updateHookState(message);
     el('auto-sync').setAttribute('aria-checked', String(message.autoSync));
     el('omni-overlay').setAttribute('aria-checked', String(message.omniOverlay));
     el('omni-local-only').setAttribute('aria-checked', String(message.omniLocalOnly !== false));
@@ -154,11 +173,7 @@ window.anytofireReceive = message => {
       closeSettings();
     }
   } else if (message.type === 'hook_state') {
-    el('plugin-enabled').setAttribute('aria-checked', String(message.pluginEnabled));
-    lastHookSource = message.hookSource || 'cfg';
-    el('hook-source').value = lastHookSource;
-    el('init-hook-source').value = lastHookSource;
-    el('plugin-enabled').disabled = false;
+    updateHookState(message);
   } else if (message.type === 'initialization' && message.needed) {
     initPendingVersion = message.version;
     openGuide();
@@ -177,15 +192,11 @@ window.anytofireReceive = message => {
       el('init-status').textContent = '正在迁移旧版本 IIDXScore 成绩…';
       runInit('init_migrate');
     } else {
-      initStep('inject');
-      el('init-status').textContent = '正在更新 DLL 注入配置…';
-      runInit('init_inject');
+      preparePluginLaunch();
     }
   } else if (message.type === 'init_migrated') {
     el('init-step-migrate').classList.add('done');
-    initStep('inject');
-    el('init-status').textContent = '正在更新 DLL 注入配置…';
-    runInit('init_inject');
+    preparePluginLaunch();
   } else if (message.type === 'init_complete') {
     el('init-step-inject').classList.add('done');
     initStep('');
@@ -206,7 +217,7 @@ window.anytofireReceive = message => {
     el('init-retry').hidden = false;
   } else if (message.type === 'toast' || message.type === 'error') {
     if (message.type === 'error') el('refresh-recent').disabled = false;
-    if (message.type === 'error') { el('hook-source').value = lastHookSource; el('init-start').disabled = false; el('plugin-enabled').disabled = false; initSourcePending = false; }
+    if (message.type === 'error') { selectHookMode('hook-source', lastHookSource); el('init-start').disabled = false; el('plugin-enabled').disabled = lastHookSource === 'bat'; initSourcePending = false; }
     toast(message.message);
   }
 };
@@ -327,8 +338,14 @@ el('init-retry').addEventListener('click', () => runInit(initAction));
 el('access-code').addEventListener('input', updateAutoSyncControl);
 el('auto-sync').addEventListener('click', () => { if (el('auto-sync').disabled) return; const enabled = el('auto-sync').getAttribute('aria-checked') !== 'true'; el('auto-sync').setAttribute('aria-checked', String(enabled)); });
 el('plugin-enabled').addEventListener('click', () => { const enabled = el('plugin-enabled').getAttribute('aria-checked') !== 'true'; el('plugin-enabled').disabled = true; call('set_plugin_enabled', {enabled}); });
-el('hook-source').addEventListener('change', () => call('set_hook_source', {source: el('hook-source').value}));
-el('init-start').addEventListener('click', () => { initSourcePending = true; el('init-start').disabled = true; call('set_hook_source', {source: el('init-hook-source').value}); });
+el('copy-hook-arg').addEventListener('click', () => {
+  const input = el('manual-hook-arg');
+  input.focus();
+  input.select();
+  toast(document.execCommand('copy') ? '已复制启动参数' : '请按 Ctrl+C 复制已选中的参数');
+});
+el('hook-source').addEventListener('change', event => call('set_hook_source', {source: event.target.value}));
+el('init-start').addEventListener('click', () => { initSourcePending = true; el('init-start').disabled = true; call('set_hook_source', {source: el('init-hook-source').querySelector('input:checked').value}); });
 el('omni-overlay').addEventListener('click', () => { const enabled = el('omni-overlay').getAttribute('aria-checked') !== 'true'; el('omni-overlay').setAttribute('aria-checked', String(enabled)); });
 el('omni-local-only').addEventListener('click', () => { const enabled = el('omni-local-only').getAttribute('aria-checked') !== 'true'; el('omni-local-only').setAttribute('aria-checked', String(enabled)); });
 el('save-sync').addEventListener('click', () => call('set_sync', {autoMerge: el('auto-merge').getAttribute('aria-checked') === 'true', autoUpdate: el('auto-update').getAttribute('aria-checked') === 'true', autoSync: el('auto-sync').getAttribute('aria-checked') === 'true', omniOverlay: el('omni-overlay').getAttribute('aria-checked') === 'true', omniLocalOnly: el('omni-local-only').getAttribute('aria-checked') === 'true', accessCode: el('access-code').value}));
