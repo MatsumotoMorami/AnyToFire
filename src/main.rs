@@ -45,30 +45,21 @@ extern "system" {
 extern "system" { fn MessageBoxW(hwnd: Hwnd, text: *const u16, title: *const u16, flags: u32) -> i32; }
 
 fn wide(s: &str) -> Vec<u16> { s.encode_utf16().chain(Some(0)).collect() }
-#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum HookSource { Cfg, Bat }
-impl HookSource {
-    fn as_str(self) -> &'static str { if self == Self::Cfg { "cfg" } else { "bat" } }
-    fn parse(value: &str) -> Result<Self, String> {
-        match value { "cfg" => Ok(Self::Cfg), "bat" => Ok(Self::Bat), _ => Err("请选择 XML 自动配置或命令行手动配置".into()) }
-    }
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LaunchSettings {
-    source: HookSource,
+    #[serde(default, rename = "source", skip_serializing)]
+    legacy_source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cfg_enabled: Option<bool>,
 }
 
 fn source_path(game_dir: &Path) -> PathBuf { layout::config_path(game_dir, "AnyToFire_launch.json") }
 
-fn load_launch(game_dir: &Path) -> Result<Option<LaunchSettings>, String> {
+fn load_launch(game_dir: &Path) -> Result<LaunchSettings, String> {
     match fs::read(source_path(game_dir)) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|e| format!("启动方式配置损坏：{e}")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("启动方式配置损坏：{e}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LaunchSettings::default()),
         Err(error) => Err(format!("无法读取启动方式配置：{error}")),
     }
 }
@@ -76,12 +67,6 @@ fn load_launch(game_dir: &Path) -> Result<Option<LaunchSettings>, String> {
 fn save_launch(game_dir: &Path, settings: &LaunchSettings) -> Result<(), String> {
     let encoded = serde_json::to_vec(settings).map_err(|e| format!("启动方式配置无法编码：{e}"))?;
     core::atomic_write(&source_path(game_dir), &encoded).map_err(|e| format!("保存启动方式失败：{e}"))
-}
-
-fn configured_launch(game_dir: &Path) -> Result<Option<LaunchSettings>, String> {
-    Ok(load_launch(game_dir)?.or_else(|| initialization_marker(game_dir).is_file().then_some(
-        LaunchSettings { source: HookSource::Cfg, cfg_enabled: None },
-    )))
 }
 
 fn spice_config_path() -> Result<PathBuf, String> {
@@ -102,22 +87,40 @@ fn cfg_plugin_enabled() -> Result<bool, String> {
     Ok(SpiceConfig::parse(xml.as_deref().unwrap_or(EMPTY_XML))?.plugin_enabled())
 }
 
-fn repair_cfg_hook(path: &Path, binary: &Path, restore_missing: bool) -> Result<(), String> {
+#[derive(Clone, Copy)]
+enum HookChange { Enable, Disable, Repair }
+
+fn configure_cfg_hook(path: &Path, binary: &Path, change: HookChange, remove_legacy: bool) -> Result<(), String> {
     let original = read_hook_config(path)?;
     let cfg = SpiceConfig::parse(original.as_deref().unwrap_or(EMPTY_XML))?;
-    if !(cfg.plugin_enabled() || restore_missing && cfg.hook_value().is_none()) {
-        return Ok(());
-    }
-    let hook = layout::plugin_hook_path(binary)?;
-    let updated = cfg.set_hook(Some(&hook), false);
+    let enabled = match change {
+        HookChange::Enable => true,
+        HookChange::Disable if cfg.plugin_enabled() => false,
+        HookChange::Repair if cfg.plugin_enabled() || cfg.hook_value().is_none() => true,
+        HookChange::Disable | HookChange::Repair => return Ok(()),
+    };
+    let hook = enabled.then(|| layout::plugin_hook_path(binary)).transpose()?;
+    let updated = cfg.set_hook(hook.as_deref(), remove_legacy);
     write_hook_config(path, original.as_deref(), &updated)
 }
 
-fn migrate_plugin_hook(game_dir: &Path, binary: &Path) -> Result<(), String> {
-    let Some(launch) = configured_launch(game_dir)? else { return Ok(()); };
-    if launch.source == HookSource::Bat { return Ok(()); }
-    let restore_missing = launch.cfg_enabled.unwrap_or_else(|| initialization_marker(game_dir).is_file());
-    repair_cfg_hook(&spice_config_path()?, binary, restore_missing)
+fn migrate_plugin_hook(game_dir: &Path, binary: &Path, cfg_path: &Path) -> Result<(), String> {
+    let mut launch = load_launch(game_dir)?;
+    let initialized = initialization_marker(game_dir).is_file();
+    let legacy_bat = initialized && launch.legacy_source.as_deref() == Some("bat");
+    let change = match launch.cfg_enabled {
+        _ if legacy_bat => HookChange::Enable,
+        Some(true) => HookChange::Enable,
+        Some(false) => return Ok(()),
+        None if initialized => HookChange::Repair,
+        None => return Ok(()),
+    };
+    configure_cfg_hook(cfg_path, binary, change, false)?;
+    if legacy_bat {
+        launch.cfg_enabled = Some(true);
+        save_launch(game_dir, &launch)?;
+    }
+    Ok(())
 }
 
 fn write_hook_config(path: &Path, original: Option<&str>, updated: &str) -> Result<(), String> {
@@ -132,24 +135,10 @@ fn write_hook_config(path: &Path, original: Option<&str>, updated: &str) -> Resu
     core::atomic_write(path, updated.as_bytes()).map_err(|e| format!("更新 {} 失败：{e}", path.display()))
 }
 
-fn select_hook_source(game_dir: &Path, source: HookSource) -> Result<(), String> {
-    let cfg_enabled = load_launch(game_dir)?.and_then(|settings| settings.cfg_enabled);
-    save_launch(game_dir, &LaunchSettings { source, cfg_enabled })
-}
-
 fn set_plugin_hooks(game_dir: &Path, binary: &Path, enabled: bool, initializing: bool) -> Result<(), String> {
-    let Some(mut launch) = configured_launch(game_dir)? else { return Err("请先选择插件加载方式".into()); };
-    if launch.source == HookSource::Bat {
-        return if initializing { Ok(()) } else { Err("请在实际的启动命令中增删 AnyToFire 的 -k 参数".into()) };
-    }
-    let path = spice_config_path()?;
-    let original = read_hook_config(&path)?;
-    let cfg = SpiceConfig::parse(original.as_deref().unwrap_or(EMPTY_XML))?;
-    if enabled || cfg.plugin_enabled() {
-        let hook = enabled.then(|| layout::plugin_hook_path(binary)).transpose()?;
-        let updated = cfg.set_hook(hook.as_deref(), initializing);
-        write_hook_config(&path, original.as_deref(), &updated)?;
-    }
+    let mut launch = load_launch(game_dir)?;
+    let change = if enabled { HookChange::Enable } else { HookChange::Disable };
+    configure_cfg_hook(&spice_config_path()?, binary, change, initializing)?;
     launch.cfg_enabled = Some(enabled);
     save_launch(game_dir, &launch)
 }
@@ -293,51 +282,55 @@ mod hook_tests {
         fs::write(dir.join(layout::PLUGIN_DLL), b"fixture").unwrap();
         let without_hook = "<games/>";
 
-        repair_cfg_hook(&xml, &exe, false).unwrap();
+        configure_cfg_hook(&xml, &exe, HookChange::Disable, false).unwrap();
         assert!(!xml.exists());
         fs::write(&xml, without_hook).unwrap();
-        repair_cfg_hook(&xml, &exe, false).unwrap();
+        configure_cfg_hook(&xml, &exe, HookChange::Disable, false).unwrap();
         assert_eq!(fs::read_to_string(&xml).unwrap(), without_hook);
-        repair_cfg_hook(&xml, &exe, true).unwrap();
+        configure_cfg_hook(&xml, &exe, HookChange::Repair, false).unwrap();
         let repaired = fs::read_to_string(&xml).unwrap();
         assert_eq!(SpiceConfig::parse(&repaired).unwrap().hook_value(), Some(layout::plugin_hook_path(&exe).unwrap().as_str()));
         assert_eq!(fs::read_to_string(&backup).unwrap(), without_hook);
-        repair_cfg_hook(&xml, &exe, true).unwrap();
+        configure_cfg_hook(&xml, &exe, HookChange::Repair, false).unwrap();
         assert_eq!(fs::read_to_string(&backup).unwrap(), without_hook);
 
         fs::remove_file(&xml).unwrap();
-        repair_cfg_hook(&xml, &exe, true).unwrap();
+        configure_cfg_hook(&xml, &exe, HookChange::Repair, false).unwrap();
         assert!(SpiceConfig::parse(&fs::read_to_string(&xml).unwrap()).unwrap().plugin_enabled());
         fs::write(&xml, "<games>").unwrap();
-        assert!(repair_cfg_hook(&xml, &exe, true).is_err());
+        assert!(configure_cfg_hook(&xml, &exe, HookChange::Repair, false).is_err());
         assert_eq!(fs::read_to_string(&xml).unwrap(), "<games>");
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn manual_launch_keeps_existing_scripts_and_accepts_custom_names() {
+    fn old_bat_install_moves_to_xml_even_with_an_existing_hook_list() {
         let game = std::env::temp_dir().join(format!("atf-hook-layout-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&game).unwrap();
         let start = game.join("start.bat");
-        let custom = game.join("play-iidx.cmd");
-        let duplicate_hooks = b"spice64.exe -k \"firenet.dll AnyToFire\\AnyToFire.dll\" -k AnyToFire.dll\r\n";
-        fs::write(&start, duplicate_hooks).unwrap();
-        fs::write(&custom, duplicate_hooks).unwrap();
+        let old_script = b"spice64.exe -k \"firenet.dll AnyToFire.dll\"\r\n";
+        fs::write(&start, old_script).unwrap();
         let binary = game.join("AnyToFire.exe");
+        fs::write(game.join(layout::PLUGIN_DLL), b"fixture").unwrap();
+        fs::write(initialization_marker(&game), "{}").unwrap();
+        fs::write(source_path(&game), r#"{"source":"bat","cfgEnabled":false}"#).unwrap();
+        let xml = game.join("spicetools.xml");
+        fs::write(&xml, "<games><game name='Beatmania IIDX'><options><option name='k' value='omni.dll'/></options></game></games>").unwrap();
 
-        select_hook_source(&game, HookSource::Bat).unwrap();
-        migrate_plugin_hook(&game, &binary).unwrap();
-        set_plugin_hooks(&game, &binary, true, true).unwrap();
-        assert!(set_plugin_hooks(&game, &binary, true, false).is_err());
-        assert!(set_plugin_hooks(&game, &binary, false, false).is_err());
-        assert_eq!(fs::read(&start).unwrap(), duplicate_hooks);
-        assert_eq!(fs::read(&custom).unwrap(), duplicate_hooks);
-        assert!(!game.join("start.bat.AnyToFire.bak").exists());
+        migrate_plugin_hook(&game, &binary, &xml).unwrap();
+        let first = fs::read(&xml).unwrap();
+        migrate_plugin_hook(&game, &binary, &xml).unwrap();
+        assert_eq!(fs::read(&xml).unwrap(), first);
+        let content = fs::read_to_string(&xml).unwrap();
+        let cfg = SpiceConfig::parse(&content).unwrap();
+        assert!(cfg.plugin_enabled());
+        assert!(cfg.hook_value().unwrap().starts_with("omni.dll "));
+        assert_eq!(fs::read(&start).unwrap(), old_script);
+        assert_eq!(load_launch(&game).unwrap().cfg_enabled, Some(true));
 
-        fs::remove_file(&start).unwrap();
-        select_hook_source(&game, HookSource::Bat).unwrap();
-        migrate_plugin_hook(&game, &binary).unwrap();
-        set_plugin_hooks(&game, &binary, true, true).unwrap();
-        assert!(!start.exists());
+        fs::write(source_path(&game), r#"{"source":"cfg","cfgEnabled":false}"#).unwrap();
+        fs::remove_file(&xml).unwrap();
+        migrate_plugin_hook(&game, &binary, &xml).unwrap();
+        assert!(!xml.exists());
         fs::remove_dir_all(game).unwrap();
     }
     #[test]
@@ -446,25 +439,15 @@ impl App {
         self.send(json!({"type":"recent", "items":recent})); Ok(())
     }
     fn game_dir(&self) -> &Path { &self.game_dir }
-    fn hook_state(&self) -> Result<Value, String> {
-        let source = configured_launch(self.game_dir())?.map(|launch| launch.source);
-        let mut state = json!({"hookSource": source.unwrap_or(HookSource::Cfg).as_str()});
-        if source == Some(HookSource::Bat) {
-            match layout::plugin_hook_path(&self.binary) {
-                Ok(path) => state["hookArg"] = json!(format!("-k {path}")),
-                Err(error) => state["hookError"] = json!(error),
-            }
-        } else {
-            match source.map(|_| cfg_plugin_enabled()).transpose() {
-                Ok(enabled) => state["pluginEnabled"] = json!(enabled.unwrap_or(false)),
-                Err(error) => state["hookError"] = json!(error),
-            }
+    fn hook_state(&self) -> Value {
+        match cfg_plugin_enabled() {
+            Ok(enabled) => json!({"pluginEnabled": enabled}),
+            Err(error) => json!({"pluginEnabled": false, "hookError": error}),
         }
-        Ok(state)
     }
     fn send_settings(&self) -> Result<(), String> {
         let settings=push::load_settings(self.game_dir()).map_err(|e| e.to_string())?;
-        let mut state = self.hook_state()?;
+        let mut state = self.hook_state();
         state["type"] = json!("settings");
         state["autoSync"] = json!(settings.auto_sync_enabled());
         state["hasAccessCode"] = json!(settings.has_access_code());
@@ -475,11 +458,10 @@ impl App {
         self.send(state);
         Ok(())
     }
-    fn send_hook_state(&self) -> Result<(), String> {
-        let mut state = self.hook_state()?;
+    fn send_hook_state(&self) {
+        let mut state = self.hook_state();
         state["type"] = json!("hook_state");
         self.send(state);
-        Ok(())
     }
     fn item(&self, id: &str) -> Result<Collection, String> {
         self.items()?.into_iter().find(|x| x.id == id).ok_or_else(|| "找不到这份成绩".into())
@@ -500,7 +482,7 @@ impl App {
     fn command(&self, request: Value) -> Result<(), String> {
         match request["action"].as_str().unwrap_or("") {
             "ready" => {
-                if let Err(error) = migrate_plugin_hook(self.game_dir(), &self.binary) {
+                if let Err(error) = spice_config_path().and_then(|path| migrate_plugin_hook(self.game_dir(), &self.binary, &path)) {
                     self.notify(&format!("无法更新 Spice XML：{error}"));
                 }
                 self.refresh()?; self.send_settings()?;
@@ -513,7 +495,6 @@ impl App {
             },
             "refresh" => { self.refresh()?; self.send_settings() },
             "init_prepare" => {
-                if load_launch(self.game_dir())?.is_none() { return Err("请先选择插件加载方式".into()); }
                 if !matches!(game_version(self.game_dir())?, 33 | 34) { return Err("当前游戏版本不受支持，未修改 IIDXScore 或注入配置".into()); }
                 let migration_needed = prepare_score(self.game_dir())?;
                 self.send(json!({"type":"init_prepared","migrationNeeded":migration_needed})); Ok(())
@@ -524,7 +505,8 @@ impl App {
             }
             "init_inject" => {
                 if !matches!(game_version(self.game_dir())?, 33 | 34) { return Err("当前游戏版本不受支持，未改动注入配置".into()); }
-                set_plugin_hooks(self.game_dir(), &self.binary, true, true)?;
+                let enabled = load_launch(self.game_dir())?.cfg_enabled.unwrap_or(true);
+                set_plugin_hooks(self.game_dir(), &self.binary, enabled, true)?;
                 fs::write(initialization_marker(self.game_dir()), json!({"version":game_version(self.game_dir())?,"completedAt":core::now()}).to_string())
                     .map_err(|e| format!("保存初始化状态失败: {e}"))?;
                 self.send_settings()?;
@@ -543,19 +525,10 @@ impl App {
                 self.send(json!({"type":"settings_saved"}));
                 self.refresh()?; self.check_update(); self.send_settings()?; self.notify("设置已保存；Omnifix 显示与本地存分开关在下次启动游戏时生效"); Ok(())
             }
-            "set_hook_source" => {
-                let source=HookSource::parse(request["source"].as_str().unwrap_or(""))?;
-                select_hook_source(self.game_dir(), source)?;
-                if let Err(error) = migrate_plugin_hook(self.game_dir(), &self.binary) {
-                    self.notify(&format!("无法更新 Spice XML：{error}"));
-                }
-                self.send_hook_state()?;
-                self.send(json!({"type":"hook_source_saved"})); Ok(())
-            }
             "set_plugin_enabled" => {
                 let enabled=request["enabled"].as_bool().ok_or("缺少插件开关状态")?;
                 set_plugin_hooks(self.game_dir(), &self.binary, enabled, false)?;
-                self.send_hook_state()?;
+                self.send_hook_state();
                 self.notify(if enabled { "已启用插件，下次启动游戏时生效" } else { "已停用插件，下次启动游戏时生效" }); Ok(())
             }
             "logout" => {
