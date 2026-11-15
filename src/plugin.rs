@@ -623,13 +623,25 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let Some(path) = module_path(*INSTANCE.get().unwrap_or(&0)) else { return 0; };
     let working_dir = std::env::current_dir().ok();
     let host = module_path(0);
-    let dir = layout::game_dir_for_plugin(&path, working_dir.as_deref(), host.as_deref());
+    // Spice loads the game before normal -k hooks. An early hook can arrive first.
+    let name = wstr("bm2dx.dll");
+    let mut base = 0usize;
+    for _ in 0..600 {
+        base = GetModuleHandleW(name.as_ptr()) as usize;
+        if base != 0 { break; }
+        Sleep(100);
+    }
+    let game_module = (base != 0).then(|| module_path(base)).flatten();
+    let dir = layout::game_dir_for_plugin(&path, working_dir.as_deref(), host.as_deref(), game_module.as_deref());
     let _ = LOG_PATH.set(layout::config_path(&dir,"AnyToFire.log"));
     log(&format!("AnyToFire {} 启动", env!("CARGO_PKG_VERSION")));
     log(&format!("DLL 路径：{}，Spice 工作目录：{}，游戏目录：{}",
         path.display(),
         working_dir.as_deref().map_or_else(|| "未知".into(), |dir| dir.display().to_string()),
         dir.display()));
+    if let Some(game_path) = game_module {
+        log(&format!("游戏模块：{}", game_path.display()));
+    }
     let catalog_path = dir.join(layout::CATALOG_PATH);
     let catalog = match core::read_catalog(&catalog_path) {
         Ok(catalog) => catalog,
@@ -646,15 +658,10 @@ unsafe extern "system" fn worker(_: *mut c_void) -> u32 {
     let catalog_version=catalog.version;
     let exports = dir.join("AnyToFire_exports"); if let Err(e) = fs::create_dir_all(&exports) { log(&format!("输出目录创建失败: {e}")); return 0; }
     let (tx, rx) = mpsc::channel(); let _ = SENDER.set(tx);
-    let name = wstr("bm2dx.dll"); let mut base = 0usize;
-    for _ in 0..600 { base = GetModuleHandleW(name.as_ptr()) as usize; if base != 0 { break; } Sleep(100); }
     let Some(game_build) = (base != 0).then(|| detect_build(base, catalog_version)).flatten() else {
         log("未识别的 bm2dx.dll；不打开 IIDXScore 数据库或安装钩子"); return 0;
     };
     let _ = GAME_BUILD.set(game_build);
-    if let Some(game_path) = module_path(base) {
-        log(&format!("游戏模块：{}", game_path.display()));
-    }
     log(&format!("已识别 bm2dx.dll {} (IIDX {})", game_build.name, game_build.version));
     let settings=push::load_settings(&dir).unwrap_or_default();
     let atf_score_enabled=settings.omni_overlay;

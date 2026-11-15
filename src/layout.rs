@@ -13,8 +13,15 @@ pub fn game_dir_from_binary(binary: &Path) -> PathBuf {
     find_game_dir(dir).unwrap_or(dir).to_path_buf()
 }
 
-pub fn game_dir_for_plugin(binary: &Path, working_dir: Option<&Path>, host: Option<&Path>) -> PathBuf {
+pub fn game_dir_for_plugin(
+    binary: &Path,
+    working_dir: Option<&Path>,
+    host: Option<&Path>,
+    game_module: Option<&Path>,
+) -> PathBuf {
+    // A launch directory with its own catalog supplies the game's data even with external DLLs.
     working_dir.filter(|dir| dir.join(CATALOG_PATH).is_file())
+        .or_else(|| game_module.and_then(Path::parent).and_then(find_game_dir))
         .or_else(|| host.and_then(Path::parent).and_then(find_game_dir))
         .or_else(|| working_dir.and_then(find_game_dir))
         .or_else(|| binary.parent().and_then(find_game_dir))
@@ -88,10 +95,10 @@ mod tests {
         let module = game.join("modules/score/custom/deep/AnyToFire.dll");
         assert_eq!(game_dir_from_binary(&module), game);
         let outside = game.with_extension("outside").join("AnyToFire.dll");
-        assert_eq!(game_dir_for_plugin(&outside, Some(&game), None), game);
-        assert_eq!(game_dir_for_plugin(&outside, None, Some(&game.join("spice64.exe"))), game);
-        assert_eq!(game_dir_for_plugin(&outside, Some(&game.join("modules")), None), game);
-        assert_eq!(game_dir_for_plugin(&outside, None, Some(&game.join("modules/spice64.exe"))), game);
+        assert_eq!(game_dir_for_plugin(&outside, Some(&game), None, None), game);
+        assert_eq!(game_dir_for_plugin(&outside, None, Some(&game.join("spice64.exe")), None), game);
+        assert_eq!(game_dir_for_plugin(&outside, Some(&game.join("modules")), None, None), game);
+        assert_eq!(game_dir_for_plugin(&outside, None, Some(&game.join("modules/spice64.exe")), None), game);
         for dir in ["", "AnyToFire", "modules", "plugins/score/custom/deep"] {
             let install = game.join(dir);
             std::fs::create_dir_all(&install).unwrap();
@@ -111,5 +118,24 @@ mod tests {
         std::fs::write(game.join("plugins/IIDXScore.ini"),"new").unwrap();
         assert_eq!(config_path(&game,"IIDXScore.ini"),game.join("plugins/IIDXScore.ini"));
         std::fs::remove_dir_all(game).unwrap();
+    }
+
+    #[test]
+    fn loaded_game_module_locates_catalog_across_spice_layouts() {
+        let fixture = std::env::temp_dir().join(format!("atf-game-module-{}", uuid::Uuid::new_v4()));
+        let launcher_dir = fixture.join("launcher-contents");
+        let game_dir = fixture.join("active-contents");
+        for dir in [&launcher_dir, &game_dir] {
+            std::fs::create_dir_all(dir.join("data/info/0")).unwrap();
+            std::fs::write(dir.join(CATALOG_PATH), b"fixture").unwrap();
+        }
+        let host = launcher_dir.join("spice64.exe");
+        let plugin = launcher_dir.join("AnyToFire/AnyToFire.dll");
+        for module in ["bm2dx.dll", "modules/bm2dx.dll", "custom/modules/bm2dx.dll"] {
+            assert_eq!(game_dir_for_plugin(&plugin, None, Some(&host), Some(&game_dir.join(module))), game_dir);
+        }
+        let module = game_dir.join("modules/bm2dx.dll");
+        assert_eq!(game_dir_for_plugin(&plugin, Some(&launcher_dir), Some(&host), Some(&module)), launcher_dir);
+        std::fs::remove_dir_all(fixture).unwrap();
     }
 }
